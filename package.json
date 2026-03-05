@@ -1,0 +1,103 @@
+{
+  "name": "usage-center-bar",
+  "displayName": "Usage Center Bar",
+  "description": "Show remaining API usage as a status bar progress bar.",
+  "version": "0.1.0",
+  "publisher": "huajin-local",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:usageCenterBar.refresh",
+    "onCommand:usageCenterBar.openSettings"
+  ],
+  "main": "./src/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "usageCenterBar.refresh",
+        "title": "Usage Center Bar: Refresh"
+      },
+      {
+        "command": "usageCenterBar.openSettings",
+        "title": "Usage Center Bar: Open Settings"
+      }
+    ],
+    "configuration": {
+      "title": "Usage Center Bar",
+      "properties": {
+        "usageCenterBar.baseUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8317",
+          "description": "Usage API base URL."
+        },
+        "usageCenterBar.endpoint": {
+          "type": "string",
+          "default": "/api/codex/usage",
+          "description": "Usage API path."
+        },
+        "usageCenterBar.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Bearer API key for usage endpoint. Leave empty if endpoint is public."
+        },
+        "usageCenterBar.pollIntervalSec": {
+          "type": "number",
+          "default": 60,
+          "minimum": 10,
+          "maximum": 3600,
+          "description": "Polling interval in seconds."
+        },
+        "usageCenterBar.requestTimeoutMs": {
+          "type": "number",
+          "default": 15000,
+          "minimum": 1000,
+          "maximum": 120000,
+          "description": "Usage request timeout in milliseconds."
+        },
+        "usageCenterBar.usedPercentPath": {
+          "type": "string",
+          "default": "rate_limit.secondary_window.used_percent",
+          "description": "JSON path to the used percentage value."
+        },
+        "usageCenterBar.barLength": {
+          "type": "number",
+          "default": 10,
+          "minimum": 5,
+          "maximum": 30,
+          "description": "Progress bar segment count."
+        },
+        "usageCenterBar.title": {
+          "type": "string",
+          "default": "Usage",
+          "description": "Prefix text in status bar."
+        },
+        "usageCenterBar.alignment": {
+          "type": "string",
+          "default": "left",
+          "enum": [
+            "left",
+            "right"
+          ],
+          "description": "Status bar alignment. VS Code currently does not support true center alignment."
+        },
+        "usageCenterBar.priority": {
+          "type": "number",
+          "default": -1000,
+          "description": "Status bar item priority (larger value is shown more to the left within the same alignment)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "lint": "echo 'no lint configured'"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.105.0"
+  }
+}
