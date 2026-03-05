@@ -66,7 +66,7 @@
         },
         "usageCenterBar.usedPercentPath": {
           "type": "string",
-          "default": "rate_limit.secondary_window.used_percent",
+          "default": "rate_limit.primary_window.used_percent",
           "description": "JSON path to the used percentage value."
         },
         "usageCenterBar.accountNamePath": {

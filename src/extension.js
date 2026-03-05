@@ -98,10 +98,22 @@ async function refreshUsage(showNotificationOnError) {
       const usedPercent = resolveUsedPercent(payload, cfg.usedPercentPath);
       const clampedUsed = clamp(usedPercent, 0, 100);
       const remaining = clamp(100 - clampedUsed, 0, 100);
-      const bar = buildBar(remaining, cfg.barLength);
+      const { weekUsed, fiveHourUsed } = resolveWeekAndFiveHourUsed(payload);
+      const weekRemaining = Number.isFinite(weekUsed) ? clamp(100 - weekUsed, 0, 100) : NaN;
+      const fiveHourRemaining = Number.isFinite(fiveHourUsed) ? clamp(100 - fiveHourUsed, 0, 100) : NaN;
+      const usageMultiplier = resolveUsageMultiplier(payload);
 
-      statusBarItem.text = `${cfg.title} ${bar} ${formatPercent(remaining)}剩余`;
-      statusBarItem.tooltip = buildTooltip(url, usedPercent, remaining, payload, accountName);
+      statusBarItem.text = buildStatusText(cfg.title, usageMultiplier, weekRemaining, fiveHourRemaining, cfg.barLength);
+      statusBarItem.tooltip = buildTooltip(
+        url,
+        usedPercent,
+        remaining,
+        payload,
+        accountName,
+        weekUsed,
+        fiveHourUsed,
+        usageMultiplier
+      );
       statusBarItem.backgroundColor = undefined;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -130,7 +142,7 @@ function getConfig() {
     apiKey: String(c.get('apiKey', '')).trim(),
     pollIntervalSec: Number(c.get('pollIntervalSec', 60)),
     requestTimeoutMs: Number(c.get('requestTimeoutMs', 15000)),
-    usedPercentPath: String(c.get('usedPercentPath', 'rate_limit.secondary_window.used_percent')).trim(),
+    usedPercentPath: String(c.get('usedPercentPath', 'rate_limit.primary_window.used_percent')).trim(),
     accountNamePath: String(c.get('accountNamePath', '')).trim(),
     accountSummaryEndpoint: String(c.get('accountSummaryEndpoint', '/v0/management/codex-usage-summary')).trim(),
     managementKey: String(c.get('managementKey', '')).trim(),
@@ -292,10 +304,12 @@ function resolveUsedPercent(payload, configuredPath) {
     candidates.push(configuredPath);
   }
   candidates.push(
-    'rate_limit.secondary_window.used_percent',
     'rate_limit.primary_window.used_percent',
+    'rate_limit.secondary_window.used_percent',
+    'total.primary_window.progress_percent',
     'total.secondary_window.progress_percent',
-    'total.primary_window.progress_percent'
+    'total.primary_window.used_percent',
+    'total.secondary_window.used_percent'
   );
 
   for (const path of candidates) {
@@ -307,6 +321,105 @@ function resolveUsedPercent(payload, configuredPath) {
   }
 
   throw new Error('cannot locate used_percent in usage payload');
+}
+
+function resolveWeekAndFiveHourUsed(payload) {
+  const primary = readRateLimitWindow(payload, 'primary');
+  const secondary = readRateLimitWindow(payload, 'secondary');
+
+  let weekUsed = NaN;
+  let fiveHourUsed = NaN;
+
+  if (Number.isFinite(primary.limitWindowSeconds) && Number.isFinite(secondary.limitWindowSeconds)) {
+    if (primary.limitWindowSeconds <= secondary.limitWindowSeconds) {
+      fiveHourUsed = primary.usedPercent;
+      weekUsed = secondary.usedPercent;
+    } else {
+      fiveHourUsed = secondary.usedPercent;
+      weekUsed = primary.usedPercent;
+    }
+  }
+
+  if (!Number.isFinite(fiveHourUsed)) {
+    if (isLikelyFiveHourWindow(primary.limitWindowSeconds)) {
+      fiveHourUsed = primary.usedPercent;
+    } else if (isLikelyFiveHourWindow(secondary.limitWindowSeconds)) {
+      fiveHourUsed = secondary.usedPercent;
+    }
+  }
+
+  if (!Number.isFinite(weekUsed)) {
+    if (isLikelyWeekWindow(primary.limitWindowSeconds)) {
+      weekUsed = primary.usedPercent;
+    } else if (isLikelyWeekWindow(secondary.limitWindowSeconds)) {
+      weekUsed = secondary.usedPercent;
+    }
+  }
+
+  if (!Number.isFinite(weekUsed)) {
+    weekUsed = Number.isFinite(secondary.usedPercent) ? secondary.usedPercent : primary.usedPercent;
+  }
+  if (!Number.isFinite(fiveHourUsed)) {
+    fiveHourUsed = Number.isFinite(primary.usedPercent) ? primary.usedPercent : secondary.usedPercent;
+  }
+
+  return {
+    weekUsed: normalizePercent(weekUsed),
+    fiveHourUsed: normalizePercent(fiveHourUsed)
+  };
+}
+
+function readRateLimitWindow(payload, windowKind) {
+  const usedCandidates = windowKind === 'primary'
+    ? [
+      'rate_limit.primary_window.used_percent',
+      'total.primary_window.progress_percent',
+      'total.primary_window.used_percent'
+    ]
+    : [
+      'rate_limit.secondary_window.used_percent',
+      'total.secondary_window.progress_percent',
+      'total.secondary_window.used_percent'
+    ];
+  const secondsCandidates = windowKind === 'primary'
+    ? [
+      'rate_limit.primary_window.limit_window_seconds',
+      'total.primary_window.limit_window_seconds'
+    ]
+    : [
+      'rate_limit.secondary_window.limit_window_seconds',
+      'total.secondary_window.limit_window_seconds'
+    ];
+
+  return {
+    usedPercent: normalizePercent(readFirstFinite(payload, usedCandidates)),
+    limitWindowSeconds: readFirstFinite(payload, secondsCandidates)
+  };
+}
+
+function readFirstFinite(payload, paths) {
+  for (const path of paths) {
+    const value = Number(getByPath(payload, path));
+    if (Number.isFinite(value)) {
+      return value;
+    }
+  }
+  return NaN;
+}
+
+function normalizePercent(value) {
+  if (!Number.isFinite(value)) {
+    return NaN;
+  }
+  return clamp(value, 0, 100);
+}
+
+function isLikelyFiveHourWindow(seconds) {
+  return Number.isFinite(seconds) && seconds >= 2 * 3600 && seconds <= 12 * 3600;
+}
+
+function isLikelyWeekWindow(seconds) {
+  return Number.isFinite(seconds) && seconds >= 5 * 24 * 3600 && seconds <= 10 * 24 * 3600;
 }
 
 function getByPath(obj, path) {
@@ -328,6 +441,24 @@ function buildBar(remainingPercent, barLength) {
   return `${'█'.repeat(filled)}${'░'.repeat(len - filled)}`;
 }
 
+function buildStatusText(title, usageMultiplier, weekRemaining, fiveHourRemaining, barLength) {
+  const weekLabel = buildWindowBadge('周', weekRemaining, barLength);
+  const fiveHourLabel = buildWindowBadge('5h', fiveHourRemaining, barLength);
+  const multiplierLabel = formatUsageMultiplierLabel(usageMultiplier);
+  if (multiplierLabel) {
+    return `${multiplierLabel} ${title} ${weekLabel} ${fiveHourLabel}`;
+  }
+  return `${title} ${weekLabel} ${fiveHourLabel}`;
+}
+
+function buildWindowBadge(label, remainingPercent, barLength) {
+  if (!Number.isFinite(remainingPercent)) {
+    return `${label} N/A`;
+  }
+  const bar = buildBar(remainingPercent, barLength);
+  return `${label}${bar}${formatPercent(remainingPercent)}`;
+}
+
 function formatPercent(v) {
   const fixed = Math.round(v * 10) / 10;
   return Number.isInteger(fixed) ? `${fixed}%` : `${fixed.toFixed(1)}%`;
@@ -345,26 +476,201 @@ function truncate(text, max) {
   return `${s.slice(0, max)}...`;
 }
 
-function buildTooltip(url, usedPercent, remainingPercent, payload, accountName) {
+function buildTooltip(url, usedPercent, remainingPercent, payload, accountName, weekUsed, fiveHourUsed, usageMultiplier) {
+  const weekRemaining = Number.isFinite(weekUsed) ? clamp(100 - weekUsed, 0, 100) : NaN;
+  const fiveHourRemaining = Number.isFinite(fiveHourUsed) ? clamp(100 - fiveHourUsed, 0, 100) : NaN;
   const lines = [
     `Usage endpoint: ${url}`,
-    `Used: ${formatPercent(usedPercent)}`,
-    `Remaining: ${formatPercent(remainingPercent)}`,
-    '',
-    'Click to refresh.'
+    `周: ${formatWindowPercent(weekUsed, weekRemaining)}`,
+    `5h: ${formatWindowPercent(fiveHourUsed, fiveHourRemaining)}`,
+    `Fallback Used: ${formatPercent(usedPercent)}`,
+    `Fallback Remaining: ${formatPercent(remainingPercent)}`,
   ];
+  const multiplierLabel = formatUsageMultiplierLabel(usageMultiplier);
+  if (multiplierLabel) {
+    lines.push(`Total capacity: ${multiplierLabel} (Plus baseline)`);
+  }
 
-  if (lastPayload && typeof lastPayload === 'object') {
-    const planType = getByPath(payload, 'plan_type');
-    if (planType) {
-      lines.splice(1, 0, `Plan: ${planType}`);
+  const planType = valueToString(getByPath(payload, 'plan_type'));
+  if (planType) {
+    lines.push(`Plan: ${planType}`);
+  }
+
+  const resolvedAccount = valueToString(accountName);
+  if (resolvedAccount) {
+    lines.push(`Account: ${resolvedAccount}`);
+  }
+
+  const email = firstNonEmptyString(payload, ['email', 'user.email', 'account.email']);
+  if (email && email !== resolvedAccount) {
+    lines.push(`Email: ${email}`);
+  }
+
+  const accountId = valueToString(getByPath(payload, 'account_id'));
+  if (accountId) {
+    lines.push(`Account ID: ${accountId}`);
+  }
+  const userId = valueToString(getByPath(payload, 'user_id'));
+  if (userId) {
+    lines.push(`User ID: ${userId}`);
+  }
+
+  appendWindowLines(lines, 'Rate limit', getByPath(payload, 'rate_limit'));
+  appendWindowLines(lines, 'Total', getByPath(payload, 'total'));
+  appendWindowLines(lines, 'Code review', getByPath(payload, 'code_review_rate_limit'));
+
+  const credits = summarizeKV(
+    getByPath(payload, 'credits'),
+    ['total', 'used', 'remaining', 'balance', 'granted', 'limit', 'expires_at', 'reset_at']
+  );
+  if (credits) {
+    lines.push(`Credits: ${credits}`);
+  }
+
+  const promo = summarizeKV(
+    getByPath(payload, 'promo'),
+    ['name', 'status', 'total', 'used', 'remaining', 'expires_at']
+  );
+  if (promo) {
+    lines.push(`Promo: ${promo}`);
+  }
+
+  const additional = getByPath(payload, 'additional_rate_limits');
+  if (Array.isArray(additional)) {
+    lines.push(`Additional limits: ${additional.length}`);
+    const preview = additional.slice(0, 3);
+    for (const item of preview) {
+      if (!item || typeof item !== 'object') {
+        continue;
+      }
+      const name = firstNonEmptyString(item, ['name', 'id', 'type']) || 'unnamed';
+      const detail = summarizeWindow(item.secondary_window)
+        || summarizeWindow(item.primary_window)
+        || summarizeKV(item, ['limit', 'used', 'remaining', 'reset_at']);
+      if (detail) {
+        lines.push(`- ${name}: ${detail}`);
+      } else {
+        lines.push(`- ${name}`);
+      }
+    }
+    if (additional.length > preview.length) {
+      lines.push(`- ... +${additional.length - preview.length} more`);
     }
   }
-  if (accountName) {
-    lines.splice(1, 0, `Account: ${accountName}`);
+
+  lines.push('', 'Click to refresh.');
+  return lines.join('\n');
+}
+
+function formatWindowPercent(used, remaining) {
+  if (!Number.isFinite(used) || !Number.isFinite(remaining)) {
+    return 'N/A';
+  }
+  return `used ${formatPercent(used)}, remaining ${formatPercent(remaining)}`;
+}
+
+function resolveUsageMultiplier(payload) {
+  const candidates = [
+    'total_usage_multiplier',
+    'meta.total_usage_multiplier'
+  ];
+  for (const path of candidates) {
+    const value = Number(getByPath(payload, path));
+    if (Number.isFinite(value) && value > 0) {
+      return value;
+    }
+  }
+  return NaN;
+}
+
+function formatUsageMultiplierLabel(multiplier) {
+  if (!Number.isFinite(multiplier) || multiplier <= 0) {
+    return '';
+  }
+  const rounded = Math.round(multiplier * 10) / 10;
+  return Number.isInteger(rounded) ? `${rounded}x` : `${rounded.toFixed(1)}x`;
+}
+
+function appendWindowLines(lines, title, obj) {
+  if (!obj || typeof obj !== 'object') {
+    return;
   }
 
-  return lines.join('\n');
+  const primary = summarizeWindow(getByPath(obj, 'primary_window'));
+  if (primary) {
+    lines.push(`${title} primary: ${primary}`);
+  }
+
+  const secondary = summarizeWindow(getByPath(obj, 'secondary_window'));
+  if (secondary) {
+    lines.push(`${title} secondary: ${secondary}`);
+  }
+
+  if (!primary && !secondary) {
+    const direct = summarizeWindow(obj);
+    if (direct) {
+      lines.push(`${title}: ${direct}`);
+    }
+  }
+}
+
+function summarizeWindow(obj) {
+  if (!obj || typeof obj !== 'object') {
+    return '';
+  }
+
+  const parts = [];
+  const usedPercent = Number(getByPath(obj, 'used_percent'));
+  if (Number.isFinite(usedPercent)) {
+    parts.push(`used ${formatPercent(usedPercent)}`);
+  }
+
+  for (const key of ['used', 'limit', 'remaining']) {
+    const value = valueToString(getByPath(obj, key));
+    if (value) {
+      parts.push(`${key}=${value}`);
+    }
+  }
+
+  const resetAt = valueToString(getByPath(obj, 'reset_at')) || valueToString(getByPath(obj, 'resets_at'));
+  if (resetAt) {
+    parts.push(`reset_at=${resetAt}`);
+  }
+  const resetIn = valueToString(getByPath(obj, 'reset_in_seconds')) || valueToString(getByPath(obj, 'reset_seconds'));
+  if (resetIn) {
+    parts.push(`reset_in=${resetIn}s`);
+  }
+
+  return parts.join(', ');
+}
+
+function summarizeKV(obj, keys) {
+  if (!obj || typeof obj !== 'object') {
+    return '';
+  }
+
+  const parts = [];
+  for (const key of keys) {
+    const value = valueToString(getByPath(obj, key));
+    if (value) {
+      parts.push(`${key}=${value}`);
+    }
+  }
+  return parts.join(', ');
+}
+
+function valueToString(v) {
+  if (v === null || v === undefined) {
+    return '';
+  }
+  if (typeof v === 'string') {
+    const s = v.trim();
+    return s || '';
+  }
+  if (typeof v === 'number' || typeof v === 'boolean') {
+    return String(v);
+  }
+  return '';
 }
 
 module.exports = {

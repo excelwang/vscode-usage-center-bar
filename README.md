@@ -5,7 +5,7 @@
 ## 功能
 
 - 定时轮询用量接口（默认 `60s`）
-- 状态栏进度条展示剩余百分比
+- 状态栏同时展示周窗口与 5h 窗口两个剩余进度条
 - 点击状态栏可手动刷新
 - 可配置 base URL、endpoint、API key、JSON 路径
 
@@ -14,7 +14,7 @@
 - `usageCenterBar.baseUrl`：默认 `http://127.0.0.1:8317`
 - `usageCenterBar.endpoint`：默认 `/api/codex/usage`
 - `usageCenterBar.apiKey`：Bearer Key
-- `usageCenterBar.usedPercentPath`：默认 `rate_limit.secondary_window.used_percent`
+- `usageCenterBar.usedPercentPath`：默认 `rate_limit.primary_window.used_percent`
 - `usageCenterBar.accountNamePath`：可选，从用量响应中提取账号名的 JSON 路径
 - `usageCenterBar.accountSummaryEndpoint`：默认 `/v0/management/codex-usage-summary`
 - `usageCenterBar.managementKey`：访问 management summary 的 key（用于解析当前选中账号）
