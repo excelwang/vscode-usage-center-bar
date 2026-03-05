@@ -15,6 +15,9 @@
 - `usageCenterBar.endpoint`：默认 `/api/codex/usage`
 - `usageCenterBar.apiKey`：Bearer Key
 - `usageCenterBar.usedPercentPath`：默认 `rate_limit.secondary_window.used_percent`
+- `usageCenterBar.accountNamePath`：可选，从用量响应中提取账号名的 JSON 路径
+- `usageCenterBar.accountSummaryEndpoint`：默认 `/v0/management/codex-usage-summary`
+- `usageCenterBar.managementKey`：访问 management summary 的 key（用于解析当前选中账号）
 - `usageCenterBar.pollIntervalSec`：默认 `60`
 - `usageCenterBar.requestTimeoutMs`：默认 `15000`
 - `usageCenterBar.barLength`：默认 `10`
@@ -26,6 +29,12 @@
 
 VS Code API 目前只支持状态栏 `left/right` 两侧，不支持绝对居中。
 本扩展通过 `alignment + priority` 提供“尽量靠中间”的布局调节。
+
+## 悬浮显示账号名
+
+- 若 `usage` 响应中本身含有账号字段，可通过 `usageCenterBar.accountNamePath` 指定路径。
+- 否则可配置 `usageCenterBar.managementKey`，插件会请求 `accountSummaryEndpoint`，
+  从当前 `selected_auth_id` 对应条目中提取邮箱/账号名，显示在悬浮提示里。
 
 ## 本地调试
 
@@ -39,4 +48,3 @@ VS Code API 目前只支持状态栏 `left/right` 两侧，不支持绝对居中
 npm i -g @vscode/vsce
 vsce package
 ```
-

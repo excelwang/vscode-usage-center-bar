@@ -93,6 +93,7 @@ async function refreshUsage(showNotificationOnError) {
       const url = joinUrl(cfg.baseUrl, cfg.endpoint);
       const payload = await fetchUsage(url, cfg.apiKey, cfg.requestTimeoutMs);
       lastPayload = payload;
+      const accountName = await resolveAccountName(cfg, payload);
 
       const usedPercent = resolveUsedPercent(payload, cfg.usedPercentPath);
       const clampedUsed = clamp(usedPercent, 0, 100);
@@ -100,7 +101,7 @@ async function refreshUsage(showNotificationOnError) {
       const bar = buildBar(remaining, cfg.barLength);
 
       statusBarItem.text = `${cfg.title} ${bar} ${formatPercent(remaining)}剩余`;
-      statusBarItem.tooltip = buildTooltip(url, usedPercent, remaining, payload);
+      statusBarItem.tooltip = buildTooltip(url, usedPercent, remaining, payload, accountName);
       statusBarItem.backgroundColor = undefined;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -130,6 +131,9 @@ function getConfig() {
     pollIntervalSec: Number(c.get('pollIntervalSec', 60)),
     requestTimeoutMs: Number(c.get('requestTimeoutMs', 15000)),
     usedPercentPath: String(c.get('usedPercentPath', 'rate_limit.secondary_window.used_percent')).trim(),
+    accountNamePath: String(c.get('accountNamePath', '')).trim(),
+    accountSummaryEndpoint: String(c.get('accountSummaryEndpoint', '/v0/management/codex-usage-summary')).trim(),
+    managementKey: String(c.get('managementKey', '')).trim(),
     barLength: Number(c.get('barLength', 10)),
     title: String(c.get('title', 'Usage')).trim() || 'Usage',
     alignment: String(c.get('alignment', 'left')).trim().toLowerCase(),
@@ -151,6 +155,24 @@ function joinUrl(baseUrl, endpoint) {
 }
 
 async function fetchUsage(url, apiKey, timeoutMs) {
+  const headers = {
+    Accept: 'application/json'
+  };
+  if (apiKey) {
+    headers.Authorization = `Bearer ${apiKey}`;
+  }
+  return fetchJSON(url, headers, timeoutMs, 'usage');
+}
+
+async function fetchAccountSummary(url, managementKey, timeoutMs) {
+  const headers = {
+    Accept: 'application/json',
+    'X-Management-Key': managementKey
+  };
+  return fetchJSON(url, headers, timeoutMs, 'account summary');
+}
+
+async function fetchJSON(url, headers, timeoutMs, purpose) {
   if (typeof fetch !== 'function') {
     throw new Error('fetch API is unavailable in this VS Code runtime');
   }
@@ -159,13 +181,6 @@ async function fetchUsage(url, apiKey, timeoutMs) {
   const timeout = setTimeout(() => controller.abort(), Math.max(1000, Number(timeoutMs) || 15000));
 
   try {
-    const headers = {
-      Accept: 'application/json'
-    };
-    if (apiKey) {
-      headers.Authorization = `Bearer ${apiKey}`;
-    }
-
     const resp = await fetch(url, {
       method: 'GET',
       headers,
@@ -181,12 +196,94 @@ async function fetchUsage(url, apiKey, timeoutMs) {
     try {
       data = JSON.parse(text);
     } catch (_e) {
-      throw new Error('usage response is not valid JSON');
+      throw new Error(`${purpose} response is not valid JSON`);
     }
     return data;
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function resolveAccountName(cfg, usagePayload) {
+  const fromPayload = resolveAccountNameFromPayload(usagePayload, cfg.accountNamePath);
+  if (fromPayload) {
+    return fromPayload;
+  }
+
+  const managementKey = String(cfg.managementKey || '').trim();
+  const summaryEndpoint = String(cfg.accountSummaryEndpoint || '').trim();
+  if (!managementKey || !summaryEndpoint) {
+    return '';
+  }
+
+  try {
+    const summaryURL = joinUrl(cfg.baseUrl, summaryEndpoint);
+    const summary = await fetchAccountSummary(summaryURL, managementKey, cfg.requestTimeoutMs);
+    return resolveAccountNameFromSummary(summary);
+  } catch (_err) {
+    return '';
+  }
+}
+
+function resolveAccountNameFromPayload(payload, configuredPath) {
+  const candidates = [];
+  if (configuredPath) {
+    candidates.push(configuredPath);
+  }
+  candidates.push('account_name', 'email', 'user.email', 'account.email');
+  return firstNonEmptyString(payload, candidates);
+}
+
+function resolveAccountNameFromSummary(summary) {
+  if (!summary || typeof summary !== 'object') {
+    return '';
+  }
+
+  const selectedID = String(getByPath(summary, 'selected_auth_id') || '').trim();
+  const authFiles = getByPath(summary, 'auth_files');
+  if (!Array.isArray(authFiles) || authFiles.length === 0) {
+    return '';
+  }
+
+  if (selectedID) {
+    for (const item of authFiles) {
+      if (!item || typeof item !== 'object') {
+        continue;
+      }
+      const authID = String(item.auth_id || '').trim();
+      if (authID !== selectedID) {
+        continue;
+      }
+      const name = firstNonEmptyString(item, ['email', 'account_name', 'file_name']);
+      if (name) {
+        return name;
+      }
+    }
+  }
+
+  for (const item of authFiles) {
+    if (!item || typeof item !== 'object') {
+      continue;
+    }
+    const name = firstNonEmptyString(item, ['email', 'account_name', 'file_name']);
+    if (name) {
+      return name;
+    }
+  }
+  return '';
+}
+
+function firstNonEmptyString(obj, paths) {
+  for (const path of paths) {
+    const value = getByPath(obj, path);
+    if (typeof value === 'string') {
+      const s = value.trim();
+      if (s) {
+        return s;
+      }
+    }
+  }
+  return '';
 }
 
 function resolveUsedPercent(payload, configuredPath) {
@@ -248,7 +345,7 @@ function truncate(text, max) {
   return `${s.slice(0, max)}...`;
 }
 
-function buildTooltip(url, usedPercent, remainingPercent, payload) {
+function buildTooltip(url, usedPercent, remainingPercent, payload, accountName) {
   const lines = [
     `Usage endpoint: ${url}`,
     `Used: ${formatPercent(usedPercent)}`,
@@ -262,6 +359,9 @@ function buildTooltip(url, usedPercent, remainingPercent, payload) {
     if (planType) {
       lines.splice(1, 0, `Plan: ${planType}`);
     }
+  }
+  if (accountName) {
+    lines.splice(1, 0, `Account: ${accountName}`);
   }
 
   return lines.join('\n');

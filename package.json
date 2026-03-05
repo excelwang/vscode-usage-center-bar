@@ -69,6 +69,21 @@
           "default": "rate_limit.secondary_window.used_percent",
           "description": "JSON path to the used percentage value."
         },
+        "usageCenterBar.accountNamePath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional JSON path for account name in usage response, e.g. user.email."
+        },
+        "usageCenterBar.accountSummaryEndpoint": {
+          "type": "string",
+          "default": "/v0/management/codex-usage-summary",
+          "description": "Management summary endpoint used to resolve selected auth account name."
+        },
+        "usageCenterBar.managementKey": {
+          "type": "string",
+          "default": "",
+          "description": "Management key for account summary endpoint (sent as X-Management-Key)."
+        },
         "usageCenterBar.barLength": {
           "type": "number",
           "default": 10,
