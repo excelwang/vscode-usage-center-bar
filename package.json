@@ -5,6 +5,10 @@
   "version": "0.1.0",
   "publisher": "huajin-local",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/excelwang/vscode-usage-center-bar.git"
+  },
   "engines": {
     "vscode": "^1.105.0"
   },
