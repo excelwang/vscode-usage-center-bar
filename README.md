@@ -1,50 +1,71 @@
-# Usage Center Bar
+# Codex Usage Timeline Bar
 
-在 VS Code 状态栏展示“当前用量剩余”的进度条。
+`Codex Usage Timeline Bar` shows usage status directly in the VS Code status bar.
 
-## 功能
+It is designed for Codex-compatible usage APIs (for example `/api/codex/usage`) and focuses on one compact view:
 
-- 定时轮询用量接口（默认 `60s`）
-- 状态栏同时展示周窗口与 5h 窗口两个剩余进度条
-- 点击状态栏可手动刷新
-- 可配置 base URL、endpoint、API key、JSON 路径
+- left section: current weekly remaining capacity
+- right section: recovery events projected on a 7-day timeline
 
-## 配置项
+## Features
 
-- `usageCenterBar.baseUrl`：默认 `http://127.0.0.1:8317`
-- `usageCenterBar.endpoint`：默认 `/api/codex/usage`
-- `usageCenterBar.apiKey`：Bearer Key
-- `usageCenterBar.usedPercentPath`：默认 `rate_limit.primary_window.used_percent`
-- `usageCenterBar.accountNamePath`：可选，从用量响应中提取账号名的 JSON 路径
-- `usageCenterBar.accountSummaryEndpoint`：默认 `/v0/management/codex-usage-summary`
-- `usageCenterBar.managementKey`：访问 management summary 的 key（用于解析当前选中账号）
-- `usageCenterBar.pollIntervalSec`：默认 `60`
-- `usageCenterBar.requestTimeoutMs`：默认 `15000`
-- `usageCenterBar.barLength`：默认 `10`
-- `usageCenterBar.title`：默认 `Usage`
-- `usageCenterBar.alignment`：`left` 或 `right`
-- `usageCenterBar.priority`：状态栏优先级
+- Status bar usage timeline with automatic polling
+- Supports weekly and 5h window parsing from official-like payloads
+- Aggregated capacity badge support (for example `Codex-6.8x`)
+- Hover tooltip with account/plan/rate-limit details
+- Click status bar to open per-auth-file usage details
+- Built-in Chinese/English UI text based on VS Code locale
 
-## 关于“居中”
+## Requirements
 
-VS Code API 目前只支持状态栏 `left/right` 两侧，不支持绝对居中。
-本扩展通过 `alignment + priority` 提供“尽量靠中间”的布局调节。
+- VS Code `1.105.0` or newer
+- Reachable usage API endpoint
 
-## 悬浮显示账号名
+## Quick Start
 
-- 若 `usage` 响应中本身含有账号字段，可通过 `usageCenterBar.accountNamePath` 指定路径。
-- 否则可配置 `usageCenterBar.managementKey`，插件会请求 `accountSummaryEndpoint`，
-  从当前 `selected_auth_id` 对应条目中提取邮箱/账号名，显示在悬浮提示里。
+1. Install the extension.
+2. Set:
+   - `usageCenterBar.baseUrl` (default `http://127.0.0.1:8317`)
+   - `usageCenterBar.endpoint` (default `/api/codex/usage`)
+   - `usageCenterBar.apiKey` (optional bearer token)
+3. Reload window or run command `Usage Center Bar: Refresh`.
 
-## 本地调试
+## Configuration
 
-1. 用 VS Code 打开本目录
-2. 按 `F5` 启动 Extension Development Host
-3. 在新窗口配置 `Usage Center Bar` 设置
+| Key | Default | Description |
+| --- | --- | --- |
+| `usageCenterBar.baseUrl` | `http://127.0.0.1:8317` | Usage API base URL |
+| `usageCenterBar.endpoint` | `/api/codex/usage` | Usage API path |
+| `usageCenterBar.apiKey` | `""` | Optional bearer token for usage endpoint |
+| `usageCenterBar.pollIntervalSec` | `60` | Polling interval (seconds) |
+| `usageCenterBar.requestTimeoutMs` | `15000` | Request timeout (milliseconds) |
+| `usageCenterBar.usedPercentPath` | `rate_limit.primary_window.used_percent` | Fallback JSON path for used percent |
+| `usageCenterBar.accountNamePath` | `""` | Optional account name JSON path |
+| `usageCenterBar.barLength` | `10` | Base length for timeline bar |
+| `usageCenterBar.title` | `Usage` | Status bar title |
+| `usageCenterBar.priority` | `-1000` | Status bar item priority |
 
-## 打包发布（可选）
+## Endpoint Notes
+
+The extension works best with payloads containing:
+
+- `rate_limit.primary_window` / `rate_limit.secondary_window`
+- `extensions.recovery.week` / `extensions.recovery.five_hour`
+- optional `extensions.active_auth_files` for detail panel
+
+When some fields are missing, the extension uses compatibility parsing logic.
+
+## Privacy
+
+- No telemetry is sent by this extension.
+- Data is only fetched from the configured usage endpoint.
+
+## Publish (Maintainers)
 
 ```bash
-npm i -g @vscode/vsce
-vsce package
+npm install
+npm run verify
+vsce publish
 ```
+
+If your Marketplace publisher ID is not `huajin-local`, update the `publisher` field in `package.json` before publishing.

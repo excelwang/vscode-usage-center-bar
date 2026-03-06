@@ -1,31 +1,66 @@
 {
   "name": "usage-center-bar",
-  "displayName": "Usage Center Bar",
-  "description": "Show remaining API usage as a status bar progress bar.",
-  "version": "0.1.0",
+  "displayName": "Codex Usage Timeline Bar",
+  "description": "Display Codex usage capacity and weekly recovery timeline in the VS Code status bar.",
+  "version": "0.2.0",
   "publisher": "huajin-local",
   "license": "MIT",
+  "homepage": "https://github.com/excelwang/vscode-usage-center-bar#readme",
+  "bugs": {
+    "url": "https://github.com/excelwang/vscode-usage-center-bar/issues"
+  },
+  "qna": false,
   "repository": {
     "type": "git",
     "url": "https://github.com/excelwang/vscode-usage-center-bar.git"
   },
+  "keywords": [
+    "codex",
+    "usage",
+    "rate-limit",
+    "quota",
+    "status-bar",
+    "openai"
+  ],
   "engines": {
     "vscode": "^1.105.0"
   },
+  "galleryBanner": {
+    "color": "#0f172a",
+    "theme": "dark"
+  },
   "categories": [
-    "Other"
+    "Other",
+    "Visualization"
+  ],
+  "files": [
+    "src/**",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "package.json"
   ],
   "activationEvents": [
     "onStartupFinished",
     "onCommand:usageCenterBar.refresh",
+    "onCommand:usageCenterBar.showDetails",
     "onCommand:usageCenterBar.openSettings"
   ],
   "main": "./src/extension.js",
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": true
+    }
+  },
   "contributes": {
     "commands": [
       {
         "command": "usageCenterBar.refresh",
         "title": "Usage Center Bar: Refresh"
+      },
+      {
+        "command": "usageCenterBar.showDetails",
+        "title": "Usage Center Bar: Show Auth File Usage Details"
       },
       {
         "command": "usageCenterBar.openSettings",
@@ -74,21 +109,11 @@
           "default": "",
           "description": "Optional JSON path for account name in usage response, e.g. user.email."
         },
-        "usageCenterBar.accountSummaryEndpoint": {
-          "type": "string",
-          "default": "/v0/management/codex-usage-summary",
-          "description": "Management summary endpoint used to resolve selected auth account name."
-        },
-        "usageCenterBar.managementKey": {
-          "type": "string",
-          "default": "",
-          "description": "Management key for account summary endpoint (sent as X-Management-Key)."
-        },
         "usageCenterBar.barLength": {
           "type": "number",
           "default": 10,
           "minimum": 5,
-          "maximum": 30,
+          "maximum": 40,
           "description": "Progress bar segment count."
         },
         "usageCenterBar.title": {
@@ -96,27 +121,22 @@
           "default": "Usage",
           "description": "Prefix text in status bar."
         },
-        "usageCenterBar.alignment": {
-          "type": "string",
-          "default": "left",
-          "enum": [
-            "left",
-            "right"
-          ],
-          "description": "Status bar alignment. VS Code currently does not support true center alignment."
-        },
         "usageCenterBar.priority": {
           "type": "number",
           "default": -1000,
-          "description": "Status bar item priority (larger value is shown more to the left within the same alignment)."
+          "description": "Status bar item priority (larger value appears more prominently)."
         }
       }
     }
   },
   "scripts": {
-    "lint": "echo 'no lint configured'"
+    "lint": "echo 'no lint configured'",
+    "check": "node --check src/extension.js",
+    "package": "vsce package --no-yarn",
+    "verify": "npm run check && npm run package"
   },
   "devDependencies": {
-    "@types/vscode": "^1.105.0"
+    "@types/vscode": "^1.105.0",
+    "@vscode/vsce": "^3.6.2"
   }
 }
