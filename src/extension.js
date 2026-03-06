@@ -4,8 +4,8 @@ let statusBarItem;
 let pollTimer;
 let inflight;
 let lastPayload;
-const AVAILABLE_SEGMENT = '🟢';
-const UNAVAILABLE_SEGMENT = '⚪';
+const AVAILABLE_SEGMENT = '■';
+const UNAVAILABLE_SEGMENT = '□';
 const DEFAULT_BASE_URL = 'http://127.0.0.1:8317';
 const DEFAULT_ENDPOINT = '/api/codex/usage';
 
