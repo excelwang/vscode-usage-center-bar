@@ -6,6 +6,7 @@ let inflight;
 let lastPayload;
 const AVAILABLE_SEGMENT = '■';
 const UNAVAILABLE_SEGMENT = '□';
+const RECOVERY_SEGMENT = '▣';
 const DEFAULT_BASE_URL = 'http://127.0.0.1:8317';
 const DEFAULT_ENDPOINT = '/api/codex/usage';
 
@@ -546,12 +547,20 @@ function buildMergedBar(weekRemaining, fiveHourRemaining, barLength, payload) {
   const baseLen = clamp(Math.round(Number(barLength) || 10), 5, 40);
   // Stretch bar to make right edge close to window center by default.
   const len = Math.max(1, Math.round(baseLen * 5));
-  const timelineBar = buildProgressiveRecoveryBar(payload, len, weekRemaining, fiveHourRemaining);
-  if (timelineBar) {
-    return timelineBar;
+  const currentAvailable = resolveCurrentAvailablePercent(payload, weekRemaining, fiveHourRemaining);
+  return buildStaticWeekBar(currentAvailable, len);
+}
+
+function resolveCurrentAvailablePercent(payload, weekRemaining, fiveHourRemaining) {
+  const recovery = resolveRecoverySummary(payload);
+  const weekWindow = normalizeRecoveryWindow(getByPath(recovery, 'week'), weekRemaining);
+  if (weekWindow && Number.isFinite(weekWindow.totalUnits) && weekWindow.totalUnits > 0) {
+    return clamp((weekWindow.baseAvailableUnits / weekWindow.totalUnits) * 100, 0, 100);
   }
-  const nowAvailable = weekRemaining > 0 && (!Number.isFinite(fiveHourRemaining) || fiveHourRemaining > 0);
-  return nowAvailable ? AVAILABLE_SEGMENT.repeat(len) : UNAVAILABLE_SEGMENT.repeat(len);
+  if (Number.isFinite(fiveHourRemaining)) {
+    return clamp(Math.min(weekRemaining, fiveHourRemaining), 0, 100);
+  }
+  return clamp(weekRemaining, 0, 100);
 }
 
 function buildProgressiveRecoveryBar(payload, segments, weekRemaining, fiveHourRemaining) {
@@ -598,14 +607,23 @@ function buildWeekQuotaProjectionBar(weekWindow, len) {
     return chars.join('');
   }
 
-  const recoveryTimeline = projectRecoveryDistribution(weekWindow, rightSlots);
+  let markerOffset = 0;
+  let markerSlots = rightSlots;
+  // Keep a visual separator so future recovery markers never look like current availability.
+  if (baseSlots > 0 && rightSlots > 0) {
+    markerOffset = 1;
+    markerSlots = rightSlots - 1;
+    chars[baseSlots] = UNAVAILABLE_SEGMENT;
+  }
+
+  const recoveryTimeline = projectRecoveryDistribution(weekWindow, markerSlots);
   if (!recoveryTimeline.length) {
     return chars.join('');
   }
 
-  for (let i = 0; i < rightSlots; i++) {
+  for (let i = 0; i < markerSlots; i++) {
     if (recoveryTimeline[i]) {
-      chars[baseSlots + i] = AVAILABLE_SEGMENT;
+      chars[baseSlots + markerOffset + i] = RECOVERY_SEGMENT;
     }
   }
   return chars.join('');
