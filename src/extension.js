@@ -55,6 +55,10 @@ const I18N = {
     listSep: '，',
     detailsTitle: '认证文件用量详情',
     detailsNoData: '当前没有可展示的认证文件用量信息',
+    detailsSectionAvailable: '可用认证文件',
+    detailsSectionWeekExhausted: '周用量已耗尽',
+    weekResetWait: '周重置等待',
+    fiveHourResetWait: '5h重置等待',
     detailsUnknownAccount: '未知账号',
     detailsUnknownPlan: '未知计划',
     detailsError: '错误：{value}',
@@ -109,6 +113,10 @@ const I18N = {
     listSep: ', ',
     detailsTitle: 'Auth file usage details',
     detailsNoData: 'No auth file usage details available',
+    detailsSectionAvailable: 'Available auth files',
+    detailsSectionWeekExhausted: 'Weekly quota exhausted',
+    weekResetWait: 'Weekly reset wait',
+    fiveHourResetWait: '5h reset wait',
     detailsUnknownAccount: 'Unknown account',
     detailsUnknownPlan: 'Unknown plan',
     detailsError: 'Error: {value}',
@@ -836,20 +844,23 @@ function buildTooltip(url, payload, accountName, usageMultiplier) {
 async function showAuthFileUsageDetails() {
   await refreshUsage(false);
   const items = resolveActiveAuthFilesUsage(lastPayload);
+  const grouped = groupAuthFileUsageItems(items);
   const recoveryItems = buildRecoveryQuickPickItems(lastPayload);
-  if (!items.length && !recoveryItems.length) {
+  if (!grouped.available.length && !grouped.exhausted.length && !recoveryItems.length) {
     await vscode.window.showInformationMessage(tr('detailsNoData'));
     return;
   }
 
-  const quickPickItems = [
-    ...recoveryItems,
-    ...items.map((item) => {
+  const mapAuthUsageItem = (item) => {
     const account = valueToString(item.account) || tr('detailsUnknownAccount');
-    const fileName = valueToString(item.file_name) || valueToString(item.auth_id) || tr('unnamed');
     const plan = valueToString(item.plan_type) || tr('detailsUnknownPlan');
-    const fiveHourBar = buildDetailsWindowBar(item.five_hour);
-    const weekBar = buildDetailsWindowBar(item.week);
+    const forceZeroRemaining = isWeekUsageExhausted(item);
+    const displayFiveHourWindow = forceZeroRemaining ? { used_percent: 100 } : item.five_hour;
+    const displayWeekWindow = forceZeroRemaining ? { used_percent: 100 } : item.week;
+    const fiveHourBar = buildDetailsWindowBar(displayFiveHourWindow);
+    const weekBar = buildDetailsWindowBar(displayWeekWindow);
+    const weekResetWait = resolveWeekResetWaitText(item);
+    const fiveHourResetWait = resolveFiveHourResetWaitText(item);
     const errorSummary = valueToString(item.error_summary) || valueToString(item.error);
     const usageDesc = tr('detailsItemDescription', {
       fiveHourLabel: tr('labelFiveHour'),
@@ -857,16 +868,35 @@ async function showAuthFileUsageDetails() {
       weekLabel: tr('labelWeek'),
       week: weekBar
     });
+    const usageWithIdentity = `${plan} · ${usageDesc}`;
     const description = errorSummary
-      ? `${usageDesc} | ${tr('detailsError', { value: truncate(errorSummary, 90) })}`
-      : usageDesc;
+      ? `${usageWithIdentity} | ${tr('detailsError', { value: truncate(errorSummary, 90) })}`
+      : usageWithIdentity;
+    const waitDetail = `${tr('weekResetWait')} ${weekResetWait} | ${tr('fiveHourResetWait')} ${fiveHourResetWait}`;
     return {
       label: account,
       description,
-      detail: tr('detailsItemDetail', { fileName, plan })
+      detail: waitDetail
     };
-    })
-  ];
+  };
+
+  const quickPickItems = [...recoveryItems];
+  if (grouped.available.length > 0) {
+    if (grouped.exhausted.length > 0) {
+      quickPickItems.push({
+        label: tr('detailsSectionAvailable'),
+        kind: vscode.QuickPickItemKind.Separator
+      });
+    }
+    quickPickItems.push(...grouped.available.map(mapAuthUsageItem));
+  }
+  if (grouped.exhausted.length > 0) {
+    quickPickItems.push({
+      label: tr('detailsSectionWeekExhausted'),
+      kind: vscode.QuickPickItemKind.Separator
+    });
+    quickPickItems.push(...grouped.exhausted.map(mapAuthUsageItem));
+  }
 
   await vscode.window.showQuickPick(quickPickItems, {
     title: tr('detailsTitle'),
@@ -879,12 +909,261 @@ async function showAuthFileUsageDetails() {
 function resolveActiveAuthFilesUsage(payload) {
   const list = getByPath(payload, 'extensions.active_auth_files');
   if (Array.isArray(list) && list.length > 0) {
-    return list
-      .filter((item) => item && typeof item === 'object')
-      .sort((a, b) => safeMillis(b.last_used_at) - safeMillis(a.last_used_at));
+    return dedupeAuthFileUsageItems(list.filter((item) => item && typeof item === 'object'));
   }
   const fallback = buildOfficialUsageFallbackItem(payload);
   return fallback ? [fallback] : [];
+}
+
+function dedupeAuthFileUsageItems(items) {
+  const byKey = new Map();
+  for (const item of items) {
+    const key = authFileUsageKey(item);
+    const current = byKey.get(key);
+    if (!current) {
+      byKey.set(key, item);
+      continue;
+    }
+    if (compareAuthUsageItems(item, current) < 0) {
+      byKey.set(key, item);
+    }
+  }
+  return Array.from(byKey.values());
+}
+
+function authFileUsageKey(item) {
+  const authID = valueToString(item.auth_id);
+  if (authID) {
+    return `auth:${authID}`;
+  }
+  const fileName = valueToString(item.file_name);
+  if (fileName) {
+    return `file:${fileName}`;
+  }
+  const account = valueToString(item.account);
+  const plan = valueToString(item.plan_type);
+  return `account:${account}|plan:${plan}`;
+}
+
+function groupAuthFileUsageItems(items) {
+  const available = [];
+  const exhausted = [];
+  for (const item of items) {
+    if (!item || typeof item !== 'object') {
+      continue;
+    }
+    if (isWeekUsageExhausted(item)) {
+      exhausted.push(item);
+    } else {
+      available.push(item);
+    }
+  }
+
+  available.sort(compareLastUsedDesc);
+  exhausted.sort(compareWeekResetWaitAscThenLastUsedDesc);
+
+  return { available, exhausted };
+}
+
+function compareAuthUsageItems(a, b) {
+  const exhaustedA = isWeekUsageExhausted(a);
+  const exhaustedB = isWeekUsageExhausted(b);
+  if (exhaustedA !== exhaustedB) {
+    return exhaustedA ? -1 : 1;
+  }
+
+  const waitA = resolveWeekResetWaitSortKey(a);
+  const waitB = resolveWeekResetWaitSortKey(b);
+  if (waitA !== waitB) {
+    return waitA - waitB;
+  }
+
+  return safeMillis(b.last_used_at) - safeMillis(a.last_used_at);
+}
+
+function compareLastUsedDesc(a, b) {
+  return safeMillis(b.last_used_at) - safeMillis(a.last_used_at);
+}
+
+function compareWeekResetWaitAscThenLastUsedDesc(a, b) {
+  const waitA = resolveWeekResetWaitSortKey(a);
+  const waitB = resolveWeekResetWaitSortKey(b);
+  if (waitA !== waitB) {
+    return waitA - waitB;
+  }
+  return safeMillis(b.last_used_at) - safeMillis(a.last_used_at);
+}
+
+function resolveWeekResetWaitText(item) {
+  const waitSeconds = resolveWeekResetWaitSeconds(item);
+  if (Number.isFinite(waitSeconds)) {
+    return formatWaitDuration(waitSeconds);
+  }
+  const text = resolveResetWaitDuration(getByPath(item, 'week'));
+  return text || tr('na');
+}
+
+function resolveFiveHourResetWaitText(item) {
+  const fiveHour = getByPath(item, 'five_hour');
+  const waitSeconds = resolveWindowWaitSeconds(fiveHour);
+  if (Number.isFinite(waitSeconds)) {
+    return formatWaitDuration(waitSeconds);
+  }
+  const text = resolveResetWaitDuration(fiveHour);
+  return text || tr('na');
+}
+
+function resolveWeekResetWaitSortKey(item) {
+  const waitSeconds = resolveWeekResetWaitSeconds(item);
+  if (!Number.isFinite(waitSeconds) || waitSeconds < 0) {
+    return Number.POSITIVE_INFINITY;
+  }
+  return waitSeconds;
+}
+
+function resolveWeekResetWaitSeconds(item) {
+  const week = getByPath(item, 'week');
+  const waitSeconds = resolveWindowWaitSeconds(week);
+  if (!Number.isFinite(waitSeconds)) {
+    return -1;
+  }
+  return Math.max(0, waitSeconds);
+}
+
+function isWeekUsageExhausted(item) {
+  const week = getByPath(item, 'week');
+  const quotaSignal = hasQuotaExhaustedSignal(item);
+  const authFailureSignal = hasAuthFailureSignal(item);
+  if (!week || typeof week !== 'object') {
+    return quotaSignal || authFailureSignal;
+  }
+
+  const limitReached = getByPath(week, 'limit_reached');
+  if (typeof limitReached === 'boolean' && limitReached) {
+    return true;
+  }
+
+  const allowed = getByPath(week, 'allowed');
+  if (typeof allowed === 'boolean' && !allowed) {
+    return true;
+  }
+
+  const usedPercent = numberFromAny(getByPath(week, 'used_percent'));
+  if (Number.isFinite(usedPercent) && usedPercent >= 99.9) {
+    return true;
+  }
+
+  const remaining = numberFromAny(getByPath(week, 'remaining'));
+  if (Number.isFinite(remaining) && remaining <= 0) {
+    return true;
+  }
+
+  return quotaSignal || authFailureSignal;
+}
+
+function hasQuotaExhaustedSignal(item) {
+  if (!item || typeof item !== 'object') {
+    return false;
+  }
+  const signals = [
+    valueToString(getByPath(item, 'status')),
+    valueToString(getByPath(item, 'error_summary')),
+    valueToString(getByPath(item, 'error'))
+  ]
+    .join(' ')
+    .toLowerCase();
+
+  if (!signals) {
+    return false;
+  }
+  return signals.includes('usage_limit_reached')
+    || signals.includes('insufficient_quota')
+    || signals.includes('rate_limit_exceeded')
+    || signals.includes('limit_reached')
+    || signals.includes('token quota')
+    || signals.includes('exceeded your current quota')
+    || signals.includes('quota has been exceeded')
+    || signals.includes('usage cap')
+    || signals.includes('usage limit')
+    || signals.includes('billing hard limit')
+    || signals.includes('credits exhausted')
+    || signals.includes('daily limit reached')
+    || signals.includes('weekly limit reached')
+    || signals.includes('monthly limit reached')
+    || signals.includes('quota exhausted')
+    || signals.includes('quota exceeded')
+    || signals.includes('weekly quota')
+    || signals.includes('week quota')
+    || signals.includes('限额已用尽')
+    || signals.includes('限额用尽')
+    || signals.includes('额度已用尽')
+    || signals.includes('额度用尽')
+    || signals.includes('配额已用尽')
+    || signals.includes('周用量')
+    || signals.includes('周额度')
+    || signals.includes('已达到使用上限')
+    || signals.includes('超出当前配额')
+    || signals.includes('配额耗尽')
+    || signals.includes('用量耗尽');
+}
+
+function hasAuthFailureSignal(item) {
+  if (!item || typeof item !== 'object') {
+    return false;
+  }
+  const signals = [
+    valueToString(getByPath(item, 'status')),
+    valueToString(getByPath(item, 'error_summary')),
+    valueToString(getByPath(item, 'error'))
+  ]
+    .join(' ')
+    .toLowerCase();
+
+  if (!signals) {
+    return false;
+  }
+  return signals.includes('token_invalidated')
+    || signals.includes('invalid_token')
+    || signals.includes('invalid access token')
+    || signals.includes('expired token')
+    || signals.includes('invalid_api_key')
+    || signals.includes('missing api key')
+    || signals.includes('unauthorized')
+    || signals.includes('forbidden')
+    || signals.includes('permission denied')
+    || signals.includes('access denied')
+    || signals.includes('authentication failed')
+    || signals.includes('auth failed')
+    || signals.includes('status=401')
+    || signals.includes('status=403')
+    || signals.includes('http 401')
+    || signals.includes('http 403')
+    || signals.includes('认证失败')
+    || signals.includes('鉴权失败')
+    || signals.includes('权限不足')
+    || signals.includes('无权限')
+    || signals.includes('访问被拒绝')
+    || signals.includes('令牌失效')
+    || signals.includes('token失效');
+}
+
+function numberFromAny(value) {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : NaN;
+  }
+  if (typeof value === 'string') {
+    const text = value.trim();
+    if (!text) {
+      return NaN;
+    }
+    const parsed = Number(text);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+    const fallback = Number.parseFloat(text.replace(/%/g, ''));
+    return Number.isFinite(fallback) ? fallback : NaN;
+  }
+  return NaN;
 }
 
 function safeMillis(value) {
