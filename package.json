@@ -2,7 +2,7 @@
   "name": "usage-center-bar",
   "displayName": "Codex Usage Timeline Bar",
   "description": "Display Codex usage capacity and weekly recovery timeline in the VS Code status bar.",
-  "version": "0.2.2",
+  "version": "0.2.5",
   "publisher": "huajin-local",
   "license": "MIT",
   "homepage": "https://github.com/excelwang/vscode-usage-center-bar#readme",

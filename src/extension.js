@@ -1,12 +1,13 @@
 const vscode = require('vscode');
 
-let statusBarItem;
+let statusBarItems = [];
 let pollTimer;
 let inflight;
 let lastPayload;
-const AVAILABLE_SEGMENT = '■';
-const UNAVAILABLE_SEGMENT = '□';
-const RECOVERY_SEGMENT = '▣';
+const AVAILABLE_SEGMENT = '█';
+const UNAVAILABLE_SEGMENT = '░';
+const RECOVERY_SEGMENT = '▓';
+const GAP_SEGMENT = ' ';
 const DEFAULT_BASE_URL = 'http://127.0.0.1:8317';
 const DEFAULT_ENDPOINT = '/api/codex/usage';
 
@@ -57,6 +58,8 @@ const I18N = {
     detailsNoData: '当前没有可展示的认证文件用量信息',
     detailsSectionAvailable: '可用认证文件',
     detailsSectionWeekExhausted: '周用量已耗尽',
+    detailsSectionHardError: '硬错误',
+    detailsPriorityGroup: '优先级 {value}',
     weekResetWait: '周重置等待',
     fiveHourResetWait: '5h重置等待',
     detailsUnknownAccount: '未知账号',
@@ -64,6 +67,12 @@ const I18N = {
     detailsError: '错误：{value}',
     recoveryShortPrefix: '恢',
     recoveryTooltipLine: '{window}渐进恢复：下次 {next}，明显 {significant}，全部 {full}',
+    combinedRecoveryLine: '综合恢复：当前 {current}，明显 {significant}，全部 {full}',
+    combinedRecoveryGateLine: '5h额外限制：锁定 {value}，下次 {wait}',
+    combinedQuickPickLabel: '综合恢复',
+    combinedQuickPickDesc: '当前 {current} | 明显 {significant} | 全部 {full}',
+    combinedQuickPickDetail: '{bar}{gate}',
+    combinedQuickPickGate: ' | 5h额外限制 {value}，{wait}后解除',
     recoveryQuickPickLabel: '{window} 渐进恢复',
     recoveryQuickPickDesc: '下次 {next} | 明显 {significant} | 全部 {full}',
     recoveryQuickPickDetail: '可恢复 {locked} / 总容量 {total}',
@@ -115,6 +124,8 @@ const I18N = {
     detailsNoData: 'No auth file usage details available',
     detailsSectionAvailable: 'Available auth files',
     detailsSectionWeekExhausted: 'Weekly quota exhausted',
+    detailsSectionHardError: 'Hard errors',
+    detailsPriorityGroup: 'Priority {value}',
     weekResetWait: 'Weekly reset wait',
     fiveHourResetWait: '5h reset wait',
     detailsUnknownAccount: 'Unknown account',
@@ -122,6 +133,12 @@ const I18N = {
     detailsError: 'Error: {value}',
     recoveryShortPrefix: 'Rec',
     recoveryTooltipLine: '{window} recovery: next {next}, significant {significant}, full {full}',
+    combinedRecoveryLine: 'Combined recovery: now {current}, significant {significant}, full {full}',
+    combinedRecoveryGateLine: 'Extra 5h gate: blocked {value}, next {wait}',
+    combinedQuickPickLabel: 'Combined recovery',
+    combinedQuickPickDesc: 'now {current} | significant {significant} | full {full}',
+    combinedQuickPickDetail: '{bar}{gate}',
+    combinedQuickPickGate: ' | 5h gate {value}, clears in {wait}',
     recoveryQuickPickLabel: '{window} recovery',
     recoveryQuickPickDesc: 'next {next} | significant {significant} | full {full}',
     recoveryQuickPickDetail: 'recoverable {locked} / total {total}',
@@ -212,30 +229,59 @@ function deactivate() {
     clearInterval(pollTimer);
     pollTimer = undefined;
   }
-  if (statusBarItem) {
-    statusBarItem.dispose();
-    statusBarItem = undefined;
+  disposeStatusBarItems();
+}
+
+function recreateStatusBarItem(_context) {
+  disposeStatusBarItems();
+  createStatusBarItem();
+}
+
+function disposeStatusBarItems() {
+  for (const item of statusBarItems) {
+    try {
+      item.dispose();
+    } catch (_e) {
+      // ignore
+    }
+  }
+  statusBarItems = [];
+}
+
+function ensureStatusBarItems(count) {
+  const cfg = getConfig();
+  while (statusBarItems.length < count) {
+    const idx = statusBarItems.length;
+    const item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, cfg.priority - idx);
+    item.name = tr('statusBarName');
+    item.command = 'usageCenterBar.showDetails';
+    statusBarItems.push(item);
+  }
+  while (statusBarItems.length > count) {
+    const item = statusBarItems.pop();
+    if (item) {
+      item.dispose();
+    }
   }
 }
 
-function recreateStatusBarItem(context) {
-  if (statusBarItem) {
-    statusBarItem.dispose();
-  }
-  createStatusBarItem();
-  if (statusBarItem) {
-    context.subscriptions.push(statusBarItem);
+function setStatusBarParts(parts, tooltip, warningBackground) {
+  const list = Array.isArray(parts) && parts.length ? parts : [{ text: '--' }];
+  ensureStatusBarItems(list.length);
+  for (let i = 0; i < statusBarItems.length; i += 1) {
+    const item = statusBarItems[i];
+    const part = list[i] || { text: '' };
+    item.text = part.text || '';
+    item.tooltip = tooltip;
+    item.color = part.color;
+    item.backgroundColor = warningBackground && i === 0 ? warningBackground : undefined;
+    item.show();
   }
 }
 
 function createStatusBarItem() {
   const cfg = getConfig();
-  statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, cfg.priority);
-  statusBarItem.name = tr('statusBarName');
-  statusBarItem.command = 'usageCenterBar.showDetails';
-  statusBarItem.text = `$(sync~spin) ${cfg.title} ${tr('loading')}`;
-  statusBarItem.tooltip = tr('fetchingTooltip');
-  statusBarItem.show();
+  setStatusBarParts([{ text: `$(sync~spin) ${cfg.title} ${tr('loading')}` }], tr('fetchingTooltip'));
 }
 
 function schedulePolling() {
@@ -252,8 +298,8 @@ function schedulePolling() {
 }
 
 async function refreshUsage(showNotificationOnError) {
-  if (!statusBarItem) {
-    return;
+  if (!statusBarItems.length) {
+    createStatusBarItem();
   }
   if (inflight) {
     return inflight;
@@ -263,30 +309,29 @@ async function refreshUsage(showNotificationOnError) {
     const cfg = getConfig();
 
     try {
-      statusBarItem.text = `$(sync~spin) ${cfg.title} ${tr('loading')}`;
+      setStatusBarParts([{ text: `$(sync~spin) ${cfg.title} ${tr('loading')}` }], tr('fetchingTooltip'));
       const url = joinUrl(cfg.baseUrl, cfg.endpoint);
       const payload = await fetchUsage(url, cfg.apiKey, cfg.requestTimeoutMs);
       lastPayload = payload;
       const accountName = resolveAccountNameFromPayload(payload, cfg.accountNamePath);
 
-      const { weekUsed, fiveHourUsed } = resolveWeekAndFiveHourUsed(payload);
-      const weekRemaining = Number.isFinite(weekUsed) ? clamp(100 - weekUsed, 0, 100) : NaN;
-      const fiveHourRemaining = Number.isFinite(fiveHourUsed) ? clamp(100 - fiveHourUsed, 0, 100) : NaN;
-      const usageMultiplier = resolveUsageMultiplier(payload);
+      const statusBarSummary = resolveStatusBarSummary(payload);
+      const { weekRemaining, fiveHourRemaining, usageMultiplier, barPayload } = statusBarSummary;
 
-      statusBarItem.text = buildStatusText(cfg.title, usageMultiplier, weekRemaining, fiveHourRemaining, cfg.barLength, payload);
-      statusBarItem.tooltip = buildTooltip(
+      const tooltip = buildTooltip(
         url,
         payload,
         accountName,
         usageMultiplier
       );
-      statusBarItem.backgroundColor = undefined;
+      setStatusBarParts(buildStatusBarParts(cfg.title, usageMultiplier, weekRemaining, fiveHourRemaining, cfg.barLength, barPayload), tooltip);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      statusBarItem.text = `$(warning) ${cfg.title} --`;
-      statusBarItem.tooltip = `${tr('fetchFailedTitle')}\n\n${message}`;
-      statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+      setStatusBarParts(
+        [{ text: `$(warning) ${cfg.title} --` }],
+        `${tr('fetchFailedTitle')}\n\n${message}`,
+        new vscode.ThemeColor('statusBarItem.warningBackground')
+      );
 
       if (showNotificationOnError) {
         void vscode.window.showWarningMessage(`${tr('warningPrefix')}: ${message}`);
@@ -473,6 +518,181 @@ function resolveWeekAndFiveHourUsed(payload) {
   };
 }
 
+function resolveStatusBarSummary(payload) {
+  const { weekUsed, fiveHourUsed } = resolveWeekAndFiveHourUsed(payload);
+  const fallback = {
+    weekRemaining: Number.isFinite(weekUsed) ? clamp(100 - weekUsed, 0, 100) : NaN,
+    fiveHourRemaining: Number.isFinite(fiveHourUsed) ? clamp(100 - fiveHourUsed, 0, 100) : NaN,
+    usageMultiplier: resolveUsageMultiplier(payload),
+    barPayload: payload
+  };
+
+  const combined = resolveCombinedRecoverySummary(payload);
+  if (combined && Number.isFinite(combined.totalUnits) && combined.totalUnits >= 0) {
+    return {
+      weekRemaining: Number.isFinite(combined.availablePercentNow) ? clamp(combined.availablePercentNow, 0, 100) : fallback.weekRemaining,
+      fiveHourRemaining: fallback.fiveHourRemaining,
+      usageMultiplier: combined.totalUnits,
+      barPayload: payload
+    };
+  }
+
+  const items = resolveActiveAuthFilesUsage(payload);
+  if (!items.length) {
+    return fallback;
+  }
+
+  const eligible = items.filter((item) => !isHardFailedAuthUsage(item));
+  if (!eligible.length) {
+    return {
+      weekRemaining: 0,
+      fiveHourRemaining: 0,
+      usageMultiplier: 0,
+      barPayload: null
+    };
+  }
+
+  const aggregated = aggregateStatusBarSummaryFromItems(eligible);
+  if (!aggregated) {
+    return fallback;
+  }
+
+  return {
+    weekRemaining: aggregated.weekRemaining,
+    fiveHourRemaining: aggregated.fiveHourRemaining,
+    usageMultiplier: aggregated.usageMultiplier,
+    barPayload: null
+  };
+}
+
+function aggregateStatusBarSummaryFromItems(items) {
+  if (!Array.isArray(items) || !items.length) {
+    return null;
+  }
+
+  let totalUnits = 0;
+  let weekAvailableUnits = 0;
+  let fiveHourAvailableUnits = 0;
+  let sawWeek = false;
+  let sawFiveHour = false;
+
+  for (const item of items) {
+    const units = resolveAuthUsageItemCapacityUnits(item);
+    if (!Number.isFinite(units) || units <= 0) {
+      continue;
+    }
+    totalUnits += units;
+
+    const weekRemaining = resolveWeekRemainingPercentForItem(item);
+    if (Number.isFinite(weekRemaining)) {
+      sawWeek = true;
+      weekAvailableUnits += units * clamp(weekRemaining, 0, 100) / 100;
+    }
+
+    const fiveHourRemaining = resolveFiveHourRemainingPercentForItem(item);
+    if (Number.isFinite(fiveHourRemaining)) {
+      sawFiveHour = true;
+      fiveHourAvailableUnits += units * clamp(fiveHourRemaining, 0, 100) / 100;
+    }
+  }
+
+  if (!Number.isFinite(totalUnits) || totalUnits <= 0) {
+    return null;
+  }
+
+  return {
+    usageMultiplier: totalUnits,
+    weekRemaining: sawWeek ? clamp((weekAvailableUnits / totalUnits) * 100, 0, 100) : NaN,
+    fiveHourRemaining: sawFiveHour ? clamp((fiveHourAvailableUnits / totalUnits) * 100, 0, 100) : NaN
+  };
+}
+
+function resolveAuthUsageItemCapacityUnits(item) {
+  const candidates = [
+    'usage_multiplier',
+    'total_usage_multiplier',
+    'capacity_units',
+    'available_units',
+    'week.total_units',
+    'five_hour.total_units'
+  ];
+  for (const path of candidates) {
+    const value = Number(getByPath(item, path));
+    if (Number.isFinite(value) && value > 0) {
+      return value;
+    }
+  }
+  return inferPlanWeightForStatusBar(valueToString(getByPath(item, 'plan_type')));
+}
+
+function inferPlanWeightForStatusBar(planType) {
+  switch (String(planType || '').trim().toLowerCase()) {
+    case 'free':
+      return 0.2;
+    case 'pro':
+      return 6.0;
+    default:
+      return 1.0;
+  }
+}
+
+function resolveWeekRemainingPercentForItem(item) {
+  if (isWeekUsageExhausted(item)) {
+    return 0;
+  }
+  return resolveWindowRemainingPercent(getByPath(item, 'week'));
+}
+
+function resolveFiveHourRemainingPercentForItem(item) {
+  if (isWeekUsageExhausted(item) || isFiveHourUsageExhausted(item)) {
+    return 0;
+  }
+
+  let window = getByPath(item, 'five_hour');
+  if ((!window || typeof window !== 'object') && String(getByPath(item, 'plan_type')).trim().toLowerCase() === 'free') {
+    window = getByPath(item, 'week');
+  }
+  return resolveWindowRemainingPercent(window);
+}
+
+function resolveWindowRemainingPercent(window) {
+  if (!window || typeof window !== 'object') {
+    return NaN;
+  }
+
+  const usedPercent = numberFromAny(getByPath(window, 'used_percent'));
+  if (Number.isFinite(usedPercent)) {
+    return clamp(100 - usedPercent, 0, 100);
+  }
+
+  const remaining = numberFromAny(getByPath(window, 'remaining'));
+  const limit = numberFromAny(getByPath(window, 'limit'));
+  if (Number.isFinite(remaining) && Number.isFinite(limit) && limit > 0) {
+    return clamp((remaining / limit) * 100, 0, 100);
+  }
+
+  return NaN;
+}
+
+function isFiveHourUsageExhausted(item) {
+  const fiveHour = getByPath(item, 'five_hour');
+  if (!fiveHour || typeof fiveHour !== 'object') {
+    return false;
+  }
+
+  const usedPercent = numberFromAny(getByPath(fiveHour, 'used_percent'));
+  if (Number.isFinite(usedPercent) && usedPercent >= 99.9) {
+    return true;
+  }
+
+  const remaining = numberFromAny(getByPath(fiveHour, 'remaining'));
+  return Number.isFinite(remaining) && remaining <= 0;
+}
+
+function isHardFailedAuthUsage(item) {
+  return hasAuthFailureSignal(item);
+}
+
 function readRateLimitWindow(payload, windowKind) {
   const usedCandidates = windowKind === 'primary'
     ? [
@@ -539,24 +759,138 @@ function getByPath(obj, path) {
   return cursor;
 }
 
+function buildStatusBarParts(title, usageMultiplier, weekRemaining, fiveHourRemaining, barLength, payload) {
+  return [{ text: buildStatusText(title, usageMultiplier, weekRemaining, fiveHourRemaining, barLength, payload) || '--' }];
+}
+
 function buildStatusText(title, usageMultiplier, weekRemaining, fiveHourRemaining, barLength, payload) {
   const mergedBar = buildMergedBar(weekRemaining, fiveHourRemaining, barLength, payload);
   const multiplierLabel = formatUsageMultiplierBadge(usageMultiplier);
-  const baseText = multiplierLabel
-    ? `${multiplierLabel} ${title} ${mergedBar}`
-    : `${title} ${mergedBar}`;
-  return baseText;
+  const resolvedTitle = localizedTitle(title);
+  const showTitle = resolvedTitle && resolvedTitle !== tr('defaultTitle');
+  if (multiplierLabel) {
+    return showTitle ? `${multiplierLabel} ${resolvedTitle} ${mergedBar}` : `${multiplierLabel} ${mergedBar}`;
+  }
+  return showTitle ? `${resolvedTitle} ${mergedBar}` : mergedBar;
 }
 
 function buildMergedBar(weekRemaining, fiveHourRemaining, barLength, payload) {
+  const baseLen = clamp(Math.round(Number(barLength) || 10), 8, 18);
+  const len = clamp(Math.round(baseLen * 2.4), 18, 36);
+  const combined = resolveCombinedRecoverySummary(payload);
+  if (combined) {
+    const bar = buildCombinedRecoveryBar(combined, len);
+    if (bar) {
+      return bar;
+    }
+  }
   if (!Number.isFinite(weekRemaining)) {
     return tr('na');
   }
-  const baseLen = clamp(Math.round(Number(barLength) || 10), 5, 40);
-  // Stretch bar to make right edge close to window center by default.
-  const len = Math.max(1, Math.round(baseLen * 5));
   const currentAvailable = resolveCurrentAvailablePercent(payload, weekRemaining, fiveHourRemaining);
   return buildStaticWeekBar(currentAvailable, len);
+}
+
+function buildCombinedRecoveryBar(combined, len) {
+  const cells = buildCombinedRecoveryCells(combined, len);
+  if (!cells.length) {
+    return '';
+  }
+  return cells.map((cell) => {
+    if (cell === 'current') {
+      return AVAILABLE_SEGMENT;
+    }
+    if (cell === 'recovery') {
+      return RECOVERY_SEGMENT;
+    }
+    return GAP_SEGMENT;
+  }).join('').replace(/\s+$/u, '');
+}
+
+function buildCombinedRecoveryCells(combined, len) {
+  if (!combined || typeof combined !== 'object') {
+    return [];
+  }
+  const totalUnits = Number(combined.totalUnits);
+  const totalSlots = clamp(Math.round(Number(len) || 18), 18, 36);
+  if (!Number.isFinite(totalUnits) || totalUnits <= 0 || totalSlots <= 0) {
+    return [];
+  }
+
+  const cells = new Array(totalSlots).fill('gap');
+  const currentUnits = clamp(Number(combined.availableUnitsNow) || 0, 0, totalUnits);
+  const currentSlots = clamp(Math.round((currentUnits / totalUnits) * totalSlots), 0, totalSlots);
+  for (let i = 0; i < currentSlots; i += 1) {
+    cells[i] = 'current';
+  }
+
+  const events = Array.isArray(combined.events) ? combined.events : [];
+  if (!events.length || currentSlots >= totalSlots) {
+    return cells;
+  }
+
+  const horizon = Math.max(1, Number(combined.fullWaitSeconds) || 0, ...events.map((event) => Number(event.waitSeconds) || 0));
+  const startBase = currentSlots > 0 ? Math.min(totalSlots - 1, currentSlots + 1) : 0;
+  const timeSlots = Math.max(1, totalSlots - startBase);
+
+  for (const event of events) {
+    const releaseUnits = Math.max(0, Number(event.releaseUnits) || 0);
+    if (!(releaseUnits > 0)) {
+      continue;
+    }
+    const width = Math.max(1, Math.round((releaseUnits / totalUnits) * totalSlots));
+    const waitSeconds = Math.max(0, Number(event.waitSeconds) || 0);
+    let start = startBase + Math.round((waitSeconds / horizon) * Math.max(0, timeSlots - 1));
+    if (start >= totalSlots) {
+      start = totalSlots - 1;
+    }
+    const end = Math.min(totalSlots, start + width);
+    for (let i = start; i < end; i += 1) {
+      if (cells[i] === 'gap') {
+        cells[i] = 'recovery';
+      }
+    }
+  }
+
+  return cells;
+}
+
+function allocateBarSegments(totalSlots, values) {
+  const len = Math.max(1, Math.round(Number(totalSlots) || 1));
+  const normalized = Array.isArray(values)
+    ? values.map((value) => Math.max(0, Number(value) || 0))
+    : [];
+  const sum = normalized.reduce((acc, value) => acc + value, 0);
+  if (!normalized.length || sum <= 0) {
+    return [0, 0, 0, len];
+  }
+
+  const raw = normalized.map((value) => (value / sum) * len);
+  const slots = raw.map((value) => Math.floor(value));
+  let remaining = len - slots.reduce((acc, value) => acc + value, 0);
+  const ranked = raw
+    .map((value, idx) => ({ idx, frac: value - slots[idx], positive: normalized[idx] > 0 }))
+    .filter((entry) => entry.positive)
+    .sort((a, b) => b.frac - a.frac || a.idx - b.idx);
+  let cursor = 0;
+  while (remaining > 0 && ranked.length > 0) {
+    slots[ranked[cursor % ranked.length].idx] += 1;
+    cursor += 1;
+    remaining -= 1;
+  }
+  while (remaining < 0 && ranked.length > 0) {
+    const idx = ranked[ranked.length - 1 - ((-remaining - 1) % ranked.length)].idx;
+    if (slots[idx] > 0) {
+      slots[idx] -= 1;
+      remaining += 1;
+      continue;
+    }
+    break;
+  }
+  while (slots.length < 4) {
+    slots.push(0);
+  }
+  return slots;
 }
 
 function resolveCurrentAvailablePercent(payload, weekRemaining, fiveHourRemaining) {
@@ -846,7 +1180,8 @@ async function showAuthFileUsageDetails() {
   const items = resolveActiveAuthFilesUsage(lastPayload);
   const grouped = groupAuthFileUsageItems(items);
   const recoveryItems = buildRecoveryQuickPickItems(lastPayload);
-  if (!grouped.available.length && !grouped.exhausted.length && !recoveryItems.length) {
+  const hasAvailable = grouped.availableGroups.some((group) => Array.isArray(group.items) && group.items.length > 0);
+  if (!hasAvailable && !grouped.exhausted.length && !grouped.hardFailed.length && !recoveryItems.length) {
     await vscode.window.showInformationMessage(tr('detailsNoData'));
     return;
   }
@@ -881,14 +1216,28 @@ async function showAuthFileUsageDetails() {
   };
 
   const quickPickItems = [...recoveryItems];
-  if (grouped.available.length > 0) {
-    if (grouped.exhausted.length > 0) {
+  const sectionCount = Number(hasAvailable) + Number(grouped.exhausted.length > 0) + Number(grouped.hardFailed.length > 0);
+
+  if (hasAvailable) {
+    if (sectionCount > 1) {
       quickPickItems.push({
         label: tr('detailsSectionAvailable'),
         kind: vscode.QuickPickItemKind.Separator
       });
     }
-    quickPickItems.push(...grouped.available.map(mapAuthUsageItem));
+    const showPrioritySeparators = grouped.availableGroups.length > 0;
+    for (const group of grouped.availableGroups) {
+      if (!Array.isArray(group.items) || !group.items.length) {
+        continue;
+      }
+      if (showPrioritySeparators) {
+        quickPickItems.push({
+          label: tr('detailsPriorityGroup', { value: group.priority }),
+          kind: vscode.QuickPickItemKind.Separator
+        });
+      }
+      quickPickItems.push(...group.items.map(mapAuthUsageItem));
+    }
   }
   if (grouped.exhausted.length > 0) {
     quickPickItems.push({
@@ -896,6 +1245,13 @@ async function showAuthFileUsageDetails() {
       kind: vscode.QuickPickItemKind.Separator
     });
     quickPickItems.push(...grouped.exhausted.map(mapAuthUsageItem));
+  }
+  if (grouped.hardFailed.length > 0) {
+    quickPickItems.push({
+      label: tr('detailsSectionHardError'),
+      kind: vscode.QuickPickItemKind.Separator
+    });
+    quickPickItems.push(...grouped.hardFailed.map(mapAuthUsageItem));
   }
 
   await vscode.window.showQuickPick(quickPickItems, {
@@ -946,23 +1302,46 @@ function authFileUsageKey(item) {
 }
 
 function groupAuthFileUsageItems(items) {
-  const available = [];
+  const availableBuckets = new Map();
   const exhausted = [];
+  const hardFailed = [];
   for (const item of items) {
     if (!item || typeof item !== 'object') {
       continue;
     }
+    if (isHardFailedAuthUsage(item)) {
+      hardFailed.push(item);
+      continue;
+    }
     if (isWeekUsageExhausted(item)) {
       exhausted.push(item);
-    } else {
-      available.push(item);
+      continue;
     }
+    const priority = resolveAuthUsagePriority(item);
+    const bucket = availableBuckets.get(priority) || [];
+    bucket.push(item);
+    availableBuckets.set(priority, bucket);
   }
 
-  available.sort(compareLastUsedDesc);
-  exhausted.sort(compareWeekResetWaitAscThenLastUsedDesc);
+  const availableGroups = Array.from(availableBuckets.entries())
+    .sort((a, b) => b[0] - a[0])
+    .map(([priority, groupItems]) => ({
+      priority,
+      items: groupItems.sort(compareLastUsedDesc)
+    }));
 
-  return { available, exhausted };
+  exhausted.sort(compareWeekResetWaitAscThenLastUsedDesc);
+  hardFailed.sort(compareLastUsedDesc);
+
+  return { availableGroups, exhausted, hardFailed };
+}
+
+function resolveAuthUsagePriority(item) {
+  const value = Number(getByPath(item, 'priority'));
+  if (Number.isFinite(value)) {
+    return Math.trunc(value);
+  }
+  return 0;
 }
 
 function compareAuthUsageItems(a, b) {
@@ -1173,6 +1552,19 @@ function safeMillis(value) {
 
 function summarizeRecoveryTooltipLines(payload) {
   const lines = [];
+  const combined = resolveCombinedRecoverySummary(payload);
+  if (combined) {
+    const combinedLine = formatCombinedRecoveryLine(combined);
+    if (combinedLine) {
+      lines.push(combinedLine);
+    }
+    const gateLine = formatCombinedGateLine(combined);
+    if (gateLine) {
+      lines.push(gateLine);
+    }
+    return lines;
+  }
+
   const recovery = resolveRecoverySummary(payload);
   const entries = [
     { window: getByPath(recovery, 'five_hour'), label: tr('window5h') },
@@ -1188,6 +1580,12 @@ function summarizeRecoveryTooltipLines(payload) {
 }
 
 function buildRecoveryQuickPickItems(payload) {
+  const combined = resolveCombinedRecoverySummary(payload);
+  if (combined) {
+    const item = formatCombinedRecoveryQuickPickItem(combined);
+    return item ? [item] : [];
+  }
+
   const recovery = resolveRecoverySummary(payload);
   const entries = [
     { window: getByPath(recovery, 'five_hour'), label: tr('window5h') },
@@ -1219,25 +1617,34 @@ function resolveRecoverySummary(payload) {
     const lockedUnits = Number.isFinite(usedPercent)
       ? clamp((usedPercent / 100) * totalUnits, 0, totalUnits)
       : 0;
+    const availableUnits = clamp(totalUnits - lockedUnits, 0, totalUnits);
     const wait = resolveWindowWaitSeconds(window);
     const resetAt = Number(window.reset_at);
     const releaseUnits = lockedUnits > 0 ? lockedUnits : NaN;
     const events = Number.isFinite(wait) && wait > 0 && Number.isFinite(releaseUnits) && releaseUnits > 0
-      ? [{ wait_seconds: wait, release_units: releaseUnits }]
+      ? [{ wait_seconds: wait, release_units: releaseUnits, available_units: totalUnits, available_percent: 100 }]
       : [];
     return {
       total_units: totalUnits,
       locked_units: lockedUnits,
+      available_units_now: availableUnits,
+      available_percent_now: totalUnits > 0 ? (availableUnits / totalUnits) * 100 : 0,
       used_percent: usedPercent,
       next_wait_seconds: Number.isFinite(wait) ? wait : 0,
       next_reset_at: Number.isFinite(resetAt) ? resetAt : 0,
       next_release_units: releaseUnits,
+      next_available_units: Number.isFinite(releaseUnits) ? totalUnits : availableUnits,
+      next_available_percent: Number.isFinite(releaseUnits) ? 100 : (totalUnits > 0 ? (availableUnits / totalUnits) * 100 : 0),
       significant_wait_seconds: Number.isFinite(wait) ? wait : 0,
       significant_reset_at: Number.isFinite(resetAt) ? resetAt : 0,
       significant_release_units: releaseUnits,
+      significant_available_units: Number.isFinite(releaseUnits) ? totalUnits : availableUnits,
+      significant_available_percent: Number.isFinite(releaseUnits) ? 100 : (totalUnits > 0 ? (availableUnits / totalUnits) * 100 : 0),
       full_wait_seconds: Number.isFinite(wait) ? wait : 0,
       full_reset_at: Number.isFinite(resetAt) ? resetAt : 0,
       full_release_units: releaseUnits,
+      full_available_units: Number.isFinite(releaseUnits) ? totalUnits : availableUnits,
+      full_available_percent: Number.isFinite(releaseUnits) ? 100 : (totalUnits > 0 ? (availableUnits / totalUnits) * 100 : 0),
       events
     };
   };
@@ -1247,19 +1654,352 @@ function resolveRecoverySummary(payload) {
   };
 }
 
-function resolveWindowWaitSeconds(window) {
+function resolveCombinedRecoverySummary(payload) {
+  const direct = normalizeCombinedRecovery(getByPath(payload, 'extensions.recovery.combined'));
+  if (direct) {
+    return direct;
+  }
+  return buildCombinedRecoveryFromItems(resolveActiveAuthFilesUsage(payload));
+}
+
+function normalizeCombinedRecovery(raw) {
+  if (!raw || typeof raw !== 'object') {
+    return null;
+  }
+  const totalUnits = Number(getByPath(raw, 'total_units'));
+  if (!Number.isFinite(totalUnits) || totalUnits < 0) {
+    return null;
+  }
+  const availableUnitsNow = clamp(Number(getByPath(raw, 'available_units_now')) || 0, 0, totalUnits);
+  const availablePercentNow = Number.isFinite(Number(getByPath(raw, 'available_percent_now')))
+    ? clamp(Number(getByPath(raw, 'available_percent_now')), 0, 100)
+    : (totalUnits > 0 ? (availableUnitsNow / totalUnits) * 100 : 0);
+  const fullAvailableUnits = clamp(Number(getByPath(raw, 'full_available_units')) || availableUnitsNow, availableUnitsNow, totalUnits);
+  const fullAvailablePercent = Number.isFinite(Number(getByPath(raw, 'full_available_percent')))
+    ? clamp(Number(getByPath(raw, 'full_available_percent')), 0, 100)
+    : (totalUnits > 0 ? (fullAvailableUnits / totalUnits) * 100 : 0);
+  const significantAvailableUnits = clamp(Number(getByPath(raw, 'significant_available_units')) || availableUnitsNow, availableUnitsNow, fullAvailableUnits);
+  const significantAvailablePercent = Number.isFinite(Number(getByPath(raw, 'significant_available_percent')))
+    ? clamp(Number(getByPath(raw, 'significant_available_percent')), 0, 100)
+    : (totalUnits > 0 ? (significantAvailableUnits / totalUnits) * 100 : 0);
+  const events = normalizeCombinedRecoveryEvents(getByPath(raw, 'events'), totalUnits, availableUnitsNow);
+  return {
+    totalUnits,
+    availableUnitsNow,
+    availablePercentNow,
+    nextWaitSeconds: Math.max(0, Number(getByPath(raw, 'next_wait_seconds')) || 0),
+    nextResetAt: Number(getByPath(raw, 'next_reset_at')) || 0,
+    nextAvailableUnits: clamp(Number(getByPath(raw, 'next_available_units')) || availableUnitsNow, availableUnitsNow, totalUnits),
+    nextAvailablePercent: clamp(Number(getByPath(raw, 'next_available_percent')) || availablePercentNow, 0, 100),
+    significantDeltaUnits: Math.max(0, Number(getByPath(raw, 'significant_delta_units')) || 0),
+    significantWaitSeconds: Math.max(0, Number(getByPath(raw, 'significant_wait_seconds')) || 0),
+    significantResetAt: Number(getByPath(raw, 'significant_reset_at')) || 0,
+    significantAvailableUnits,
+    significantAvailablePercent,
+    fullWaitSeconds: Math.max(0, Number(getByPath(raw, 'full_wait_seconds')) || 0),
+    fullResetAt: Number(getByPath(raw, 'full_reset_at')) || 0,
+    fullAvailableUnits,
+    fullAvailablePercent,
+    fiveHourBlockedUnitsNow: Math.max(0, Number(getByPath(raw, 'five_hour_blocked_units_now')) || 0),
+    fiveHourBlockedPercentNow: clamp(Number(getByPath(raw, 'five_hour_blocked_percent_now')) || 0, 0, 100),
+    fiveHourNextWaitSeconds: Math.max(0, Number(getByPath(raw, 'five_hour_next_wait_seconds')) || 0),
+    fiveHourNextResetAt: Number(getByPath(raw, 'five_hour_next_reset_at')) || 0,
+    events
+  };
+}
+
+function normalizeCombinedRecoveryEvents(eventsRaw, totalUnits, availableUnitsNow) {
+  if (!Array.isArray(eventsRaw)) {
+    return [];
+  }
+  const currentAvailable = Math.max(0, Number(availableUnitsNow) || 0);
+  return eventsRaw
+    .filter((item) => item && typeof item === 'object')
+    .map((item) => {
+      const delta = Math.max(0, Number(getByPath(item, 'release_units')) || 0);
+      const availableUnits = Number.isFinite(Number(getByPath(item, 'available_units')))
+        ? Math.max(0, Number(getByPath(item, 'available_units')))
+        : currentAvailable + Math.max(0, Number(getByPath(item, 'cumulative_release_units')) || 0);
+      const availablePercent = Number.isFinite(Number(getByPath(item, 'available_percent')))
+        ? clamp(Number(getByPath(item, 'available_percent')), 0, 100)
+        : (totalUnits > 0 ? clamp((availableUnits / totalUnits) * 100, 0, 100) : 0);
+      return {
+        waitSeconds: Math.max(0, Number(getByPath(item, 'wait_seconds')) || 0),
+        resetAt: Number(getByPath(item, 'reset_at')) || 0,
+        releaseUnits: delta,
+        availableUnits,
+        availablePercent
+      };
+    })
+    .filter((item) => item.releaseUnits > 0 || item.availableUnits > currentAvailable)
+    .sort((a, b) => a.waitSeconds - b.waitSeconds || a.resetAt - b.resetAt);
+}
+
+function buildCombinedRecoveryFromItems(items) {
+  if (!Array.isArray(items) || !items.length) {
+    return null;
+  }
+  const eligible = items.filter((item) => !isHardFailedAuthUsage(item));
+  if (!eligible.length) {
+    return {
+      totalUnits: 0,
+      availableUnitsNow: 0,
+      availablePercentNow: 0,
+      nextWaitSeconds: 0,
+      nextResetAt: 0,
+      nextAvailableUnits: 0,
+      nextAvailablePercent: 0,
+      significantDeltaUnits: 0,
+      significantWaitSeconds: 0,
+      significantResetAt: 0,
+      significantAvailableUnits: 0,
+      significantAvailablePercent: 0,
+      fullWaitSeconds: 0,
+      fullResetAt: 0,
+      fullAvailableUnits: 0,
+      fullAvailablePercent: 0,
+      fiveHourBlockedUnitsNow: 0,
+      fiveHourBlockedPercentNow: 0,
+      fiveHourNextWaitSeconds: 0,
+      fiveHourNextResetAt: 0,
+      events: []
+    };
+  }
+
+  let totalUnits = 0;
+  let availableUnitsNow = 0;
+  let fiveHourBlockedUnitsNow = 0;
+  let fiveHourNextResetAt = 0;
+  const releaseByReset = new Map();
+  const nowSeconds = Math.floor(Date.now() / 1000);
+
+  for (const item of eligible) {
+    const units = resolveAuthUsageItemCapacityUnits(item);
+    if (!Number.isFinite(units) || units <= 0) {
+      continue;
+    }
+    totalUnits += units;
+
+    const weekRemainingPercent = resolveWeekRemainingPercentForItem(item);
+    const weekAvailableUnits = Number.isFinite(weekRemainingPercent)
+      ? units * clamp(weekRemainingPercent, 0, 100) / 100
+      : units;
+    let weekLockedUnits = clamp(units - weekAvailableUnits, 0, units);
+    const weekResetAt = resolveWindowResetEpochSeconds(getByPath(item, 'week'));
+
+    const fiveWindow = resolveFiveHourWindowForItem(item);
+    const fiveBlockedNow = weekAvailableUnits > 0 && isFiveHourUsageExhausted(item);
+    const fiveResetAt = resolveWindowResetEpochSeconds(fiveWindow);
+
+    if (!fiveBlockedNow) {
+      availableUnitsNow += weekAvailableUnits;
+      if (weekLockedUnits > 0 && Number.isFinite(weekResetAt) && weekResetAt > 0) {
+        addReleaseUnitsAt(releaseByReset, weekResetAt, weekLockedUnits);
+      }
+      continue;
+    }
+
+    fiveHourBlockedUnitsNow += weekAvailableUnits;
+    if (weekAvailableUnits > 0 && Number.isFinite(fiveResetAt) && fiveResetAt > 0 && (!fiveHourNextResetAt || fiveResetAt < fiveHourNextResetAt)) {
+      fiveHourNextResetAt = fiveResetAt;
+    }
+    if (!Number.isFinite(fiveResetAt) || fiveResetAt <= 0) {
+      continue;
+    }
+
+    let deltaAtUnblock = weekAvailableUnits;
+    if (weekLockedUnits > 0 && Number.isFinite(weekResetAt) && weekResetAt > 0 && weekResetAt <= fiveResetAt) {
+      deltaAtUnblock += weekLockedUnits;
+      weekLockedUnits = 0;
+    }
+    if (deltaAtUnblock > 0) {
+      addReleaseUnitsAt(releaseByReset, fiveResetAt, deltaAtUnblock);
+    }
+    if (weekLockedUnits > 0 && Number.isFinite(weekResetAt) && weekResetAt > fiveResetAt) {
+      addReleaseUnitsAt(releaseByReset, weekResetAt, weekLockedUnits);
+    }
+  }
+
+  if (!Number.isFinite(totalUnits) || totalUnits <= 0) {
+    return null;
+  }
+
+  const combined = {
+    totalUnits,
+    availableUnitsNow,
+    availablePercentNow: clamp((availableUnitsNow / totalUnits) * 100, 0, 100),
+    nextWaitSeconds: 0,
+    nextResetAt: 0,
+    nextAvailableUnits: availableUnitsNow,
+    nextAvailablePercent: clamp((availableUnitsNow / totalUnits) * 100, 0, 100),
+    significantDeltaUnits: 0,
+    significantWaitSeconds: 0,
+    significantResetAt: 0,
+    significantAvailableUnits: availableUnitsNow,
+    significantAvailablePercent: clamp((availableUnitsNow / totalUnits) * 100, 0, 100),
+    fullWaitSeconds: 0,
+    fullResetAt: 0,
+    fullAvailableUnits: availableUnitsNow,
+    fullAvailablePercent: clamp((availableUnitsNow / totalUnits) * 100, 0, 100),
+    fiveHourBlockedUnitsNow,
+    fiveHourBlockedPercentNow: clamp((fiveHourBlockedUnitsNow / totalUnits) * 100, 0, 100),
+    fiveHourNextWaitSeconds: fiveHourNextResetAt ? Math.max(0, fiveHourNextResetAt - nowSeconds) : 0,
+    fiveHourNextResetAt,
+    events: []
+  };
+
+  const sortedResets = Array.from(releaseByReset.entries()).sort((a, b) => a[0] - b[0]);
+  let cumulative = 0;
+  for (const [resetAt, releaseUnits] of sortedResets) {
+    if (!Number.isFinite(releaseUnits) || releaseUnits <= 0) {
+      continue;
+    }
+    cumulative += releaseUnits;
+    const availableUnits = availableUnitsNow + cumulative;
+    const event = {
+      waitSeconds: Math.max(0, resetAt - nowSeconds),
+      resetAt,
+      releaseUnits,
+      availableUnits,
+      availablePercent: clamp((availableUnits / totalUnits) * 100, 0, 100)
+    };
+    combined.events.push(event);
+    if (!combined.nextResetAt) {
+      combined.nextWaitSeconds = event.waitSeconds;
+      combined.nextResetAt = event.resetAt;
+      combined.nextAvailableUnits = event.availableUnits;
+      combined.nextAvailablePercent = event.availablePercent;
+    }
+    combined.fullWaitSeconds = event.waitSeconds;
+    combined.fullResetAt = event.resetAt;
+    combined.fullAvailableUnits = event.availableUnits;
+    combined.fullAvailablePercent = event.availablePercent;
+  }
+
+  const maxFutureRelease = combined.fullAvailableUnits - availableUnitsNow;
+  combined.significantDeltaUnits = Math.max(0, Math.min(maxFutureRelease, Math.max(1, totalUnits * 0.1)));
+  if (combined.significantDeltaUnits > 0) {
+    const targetAvailableUnits = availableUnitsNow + combined.significantDeltaUnits;
+    for (const event of combined.events) {
+      if (event.availableUnits + 1e-9 < targetAvailableUnits) {
+        continue;
+      }
+      combined.significantWaitSeconds = event.waitSeconds;
+      combined.significantResetAt = event.resetAt;
+      combined.significantAvailableUnits = event.availableUnits;
+      combined.significantAvailablePercent = event.availablePercent;
+      break;
+    }
+  }
+  if (!combined.significantResetAt) {
+    combined.significantWaitSeconds = combined.fullWaitSeconds;
+    combined.significantResetAt = combined.fullResetAt;
+    combined.significantAvailableUnits = combined.fullAvailableUnits;
+    combined.significantAvailablePercent = combined.fullAvailablePercent;
+  }
+  return combined;
+}
+
+function addReleaseUnitsAt(map, resetAt, deltaUnits) {
+  const key = Math.max(0, Math.floor(Number(resetAt) || 0));
+  if (!key || !Number.isFinite(deltaUnits) || deltaUnits <= 0) {
+    return;
+  }
+  map.set(key, (map.get(key) || 0) + deltaUnits);
+}
+
+function resolveFiveHourWindowForItem(item) {
+  let window = getByPath(item, 'five_hour');
+  if ((!window || typeof window !== 'object') && String(getByPath(item, 'plan_type')).trim().toLowerCase() === 'free') {
+    window = getByPath(item, 'week');
+  }
+  return window;
+}
+
+function resolveWindowResetEpochSeconds(window) {
   if (!window || typeof window !== 'object') {
     return NaN;
   }
+  const resetAtMs = parseTimestampToMillis(getByPath(window, 'reset_at'));
+  if (Number.isFinite(resetAtMs)) {
+    return Math.round(resetAtMs / 1000);
+  }
   const waitSeconds = Number(getByPath(window, 'reset_after_seconds'));
-  if (Number.isFinite(waitSeconds)) {
-    return Math.max(0, waitSeconds);
+  if (Number.isFinite(waitSeconds) && waitSeconds > 0) {
+    return Math.floor(Date.now() / 1000) + Math.ceil(waitSeconds);
+  }
+  return NaN;
+}
+
+function resolveWindowWaitSeconds(window) {
+  if (!window || typeof window !== 'object') {
+    return NaN;
   }
   const resetAtMs = parseTimestampToMillis(getByPath(window, 'reset_at'));
   if (Number.isFinite(resetAtMs)) {
     return Math.max(0, Math.ceil((resetAtMs - Date.now()) / 1000));
   }
+  const waitSeconds = Number(getByPath(window, 'reset_after_seconds'));
+  if (Number.isFinite(waitSeconds)) {
+    return Math.max(0, waitSeconds);
+  }
   return NaN;
+}
+
+function formatCombinedRecoveryLine(combined) {
+  if (!combined || typeof combined !== 'object') {
+    return '';
+  }
+  return tr('combinedRecoveryLine', {
+    current: formatCombinedCurrentValue(combined),
+    significant: formatCombinedCheckpoint(combined.significantWaitSeconds, combined.significantAvailableUnits),
+    full: formatCombinedCheckpoint(combined.fullWaitSeconds, combined.fullAvailableUnits)
+  });
+}
+
+function formatCombinedGateLine(combined) {
+  if (!combined || typeof combined !== 'object') {
+    return '';
+  }
+  if (!Number.isFinite(Number(combined.fiveHourBlockedUnitsNow)) || Number(combined.fiveHourBlockedUnitsNow) <= 0) {
+    return '';
+  }
+  return tr('combinedRecoveryGateLine', {
+    value: formatUsageUnits(combined.fiveHourBlockedUnitsNow),
+    wait: formatWaitDuration(combined.fiveHourNextWaitSeconds)
+  });
+}
+
+function formatCombinedRecoveryQuickPickItem(combined) {
+  if (!combined || typeof combined !== 'object') {
+    return null;
+  }
+  const gate = Number.isFinite(Number(combined.fiveHourBlockedUnitsNow)) && Number(combined.fiveHourBlockedUnitsNow) > 0
+    ? tr('combinedQuickPickGate', {
+      value: formatUsageUnits(combined.fiveHourBlockedUnitsNow),
+      wait: formatWaitDuration(combined.fiveHourNextWaitSeconds)
+    })
+    : '';
+  return {
+    label: tr('combinedQuickPickLabel'),
+    description: tr('combinedQuickPickDesc', {
+      current: formatCombinedCurrentValue(combined),
+      significant: formatCombinedCheckpoint(combined.significantWaitSeconds, combined.significantAvailableUnits),
+      full: formatCombinedCheckpoint(combined.fullWaitSeconds, combined.fullAvailableUnits)
+    }),
+    detail: tr('combinedQuickPickDetail', {
+      bar: buildCombinedRecoveryBar(combined, 24),
+      gate
+    })
+  };
+}
+
+function formatCombinedCurrentValue(combined) {
+  return `${formatUsageUnits(combined.availableUnitsNow)}/${formatUsageUnits(combined.totalUnits)}`;
+}
+
+function formatCombinedCheckpoint(waitSeconds, availableUnits) {
+  return `${formatWaitDuration(waitSeconds)} → ${formatUsageUnits(availableUnits)}`;
 }
 
 function formatRecoveryTooltipLine(window, windowLabel) {
@@ -1584,6 +2324,16 @@ function resolveResetWaitDuration(obj) {
     return '';
   }
 
+  const atCandidates = [getByPath(obj, 'reset_at'), getByPath(obj, 'resets_at')];
+  for (const candidate of atCandidates) {
+    const ms = parseTimestampToMillis(candidate);
+    if (!Number.isFinite(ms)) {
+      continue;
+    }
+    const waitSeconds = Math.ceil((ms - Date.now()) / 1000);
+    return formatWaitDuration(waitSeconds);
+  }
+
   const secCandidates = [
     getByPath(obj, 'reset_after_seconds'),
     getByPath(obj, 'reset_in_seconds'),
@@ -1594,16 +2344,6 @@ function resolveResetWaitDuration(obj) {
     if (Number.isFinite(seconds)) {
       return formatWaitDuration(seconds);
     }
-  }
-
-  const atCandidates = [getByPath(obj, 'reset_at'), getByPath(obj, 'resets_at')];
-  for (const candidate of atCandidates) {
-    const ms = parseTimestampToMillis(candidate);
-    if (!Number.isFinite(ms)) {
-      continue;
-    }
-    const waitSeconds = Math.ceil((ms - Date.now()) / 1000);
-    return formatWaitDuration(waitSeconds);
   }
 
   return '';
