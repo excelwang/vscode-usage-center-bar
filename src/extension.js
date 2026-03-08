@@ -77,7 +77,10 @@ const I18N = {
     recoveryQuickPickDesc: '下次 {next} | 明显 {significant} | 全部 {full}',
     recoveryQuickPickDetail: '可恢复 {locked} / 总容量 {total}',
     detailsItemDescription: '{fiveHourLabel} {fiveHour} | {weekLabel} {week}',
-    detailsItemDetail: '{fileName} · {plan}'
+    detailsItemDetail: '{fileName} · {plan}',
+    detailsCompatOnlyLabel: '当前服务端仅返回聚合用量',
+    detailsCompatOnlyDesc: '认证文件明细接口当前不可用，因此这里只能展示综合恢复和单账户兼容视图。',
+    detailsCompatOnlyDetail: '如需完整认证文件列表，请部署带 extensions.active_auth_files 的 /api/codex/usage 实现。'
   },
   en: {
     statusBarName: 'Usage Center Bar',
@@ -143,7 +146,10 @@ const I18N = {
     recoveryQuickPickDesc: 'next {next} | significant {significant} | full {full}',
     recoveryQuickPickDetail: 'recoverable {locked} / total {total}',
     detailsItemDescription: '{fiveHourLabel} {fiveHour} | {weekLabel} {week}',
-    detailsItemDetail: '{fileName} · {plan}'
+    detailsItemDetail: '{fileName} · {plan}',
+    detailsCompatOnlyLabel: 'Server returned aggregate usage only',
+    detailsCompatOnlyDesc: 'Auth-file detail data is unavailable on the current backend, so this panel can only show combined recovery and the compat view.',
+    detailsCompatOnlyDetail: 'Deploy a /api/codex/usage implementation that returns extensions.active_auth_files to restore the full auth-file list.'
   }
 };
 
@@ -1176,10 +1182,16 @@ function buildTooltip(url, payload, accountName, usageMultiplier) {
 }
 
 async function showAuthFileUsageDetails() {
-  await refreshUsage(false);
-  const items = resolveActiveAuthFilesUsage(lastPayload);
+  let payload = lastPayload;
+  if (payload) {
+    void refreshUsage(false);
+  } else {
+    await refreshUsage(false);
+    payload = lastPayload;
+  }
+  const items = resolveActiveAuthFilesUsage(payload);
   const grouped = groupAuthFileUsageItems(items);
-  const recoveryItems = buildRecoveryQuickPickItems(lastPayload);
+  const recoveryItems = buildRecoveryQuickPickItems(payload);
   const hasAvailable = grouped.availableGroups.some((group) => Array.isArray(group.items) && group.items.length > 0);
   if (!hasAvailable && !grouped.exhausted.length && !grouped.hardFailed.length && !recoveryItems.length) {
     await vscode.window.showInformationMessage(tr('detailsNoData'));
@@ -1215,7 +1227,12 @@ async function showAuthFileUsageDetails() {
     };
   };
 
-  const quickPickItems = [...recoveryItems];
+  const quickPickItems = [];
+  const compatOnlyNotice = buildCompatOnlyNoticeItem(payload);
+  if (compatOnlyNotice) {
+    quickPickItems.push(compatOnlyNotice);
+  }
+  quickPickItems.push(...recoveryItems);
   const sectionCount = Number(hasAvailable) + Number(grouped.exhausted.length > 0) + Number(grouped.hardFailed.length > 0);
 
   if (hasAvailable) {
@@ -1260,6 +1277,26 @@ async function showAuthFileUsageDetails() {
     matchOnDetail: true,
     ignoreFocusOut: true
   });
+}
+
+function buildCompatOnlyNoticeItem(payload) {
+  if (!payload || typeof payload !== 'object') {
+    return null;
+  }
+  const list = getByPath(payload, 'extensions.active_auth_files');
+  if (Array.isArray(list) && list.length > 0) {
+    return null;
+  }
+  const rateLimit = getByPath(payload, 'rate_limit');
+  if (!rateLimit || typeof rateLimit !== 'object') {
+    return null;
+  }
+  return {
+    label: tr('detailsCompatOnlyLabel'),
+    description: tr('detailsCompatOnlyDesc'),
+    detail: tr('detailsCompatOnlyDetail'),
+    alwaysShow: true
+  };
 }
 
 function resolveActiveAuthFilesUsage(payload) {
