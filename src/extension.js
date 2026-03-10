@@ -7,7 +7,7 @@ let lastPayload;
 const AVAILABLE_SEGMENT = '█';
 const UNAVAILABLE_SEGMENT = '░';
 const RECOVERY_SEGMENT = '▓';
-const GAP_SEGMENT = ' ';
+const GAP_SEGMENT = '\u00A0';
 const DEFAULT_BASE_URL = 'http://127.0.0.1:8317';
 const DEFAULT_ENDPOINT = '/api/codex/usage';
 
@@ -60,6 +60,7 @@ const I18N = {
     detailsSectionWeekExhausted: '周用量已耗尽',
     detailsSectionHardError: '硬错误',
     detailsPriorityGroup: '优先级 {value}',
+    detailsWeight: '权重 {value}',
     weekResetWait: '周重置等待',
     fiveHourResetWait: '5h重置等待',
     detailsUnknownAccount: '未知账号',
@@ -129,6 +130,7 @@ const I18N = {
     detailsSectionWeekExhausted: 'Weekly quota exhausted',
     detailsSectionHardError: 'Hard errors',
     detailsPriorityGroup: 'Priority {value}',
+    detailsWeight: 'Weight {value}',
     weekResetWait: 'Weekly reset wait',
     fiveHourResetWait: '5h reset wait',
     detailsUnknownAccount: 'Unknown account',
@@ -631,6 +633,14 @@ function resolveAuthUsageItemCapacityUnits(item) {
   return inferPlanWeightForStatusBar(valueToString(getByPath(item, 'plan_type')));
 }
 
+function formatAuthUsageWeightInfo(item) {
+  const label = formatUsageMultiplierLabel(resolveAuthUsageItemCapacityUnits(item));
+  if (!label) {
+    return '';
+  }
+  return tr('detailsWeight', { value: label });
+}
+
 function inferPlanWeightForStatusBar(planType) {
   switch (String(planType || '').trim().toLowerCase()) {
     case 'free':
@@ -772,10 +782,15 @@ function buildStatusBarParts(title, usageMultiplier, weekRemaining, fiveHourRema
 function buildStatusText(title, usageMultiplier, weekRemaining, fiveHourRemaining, barLength, payload) {
   const mergedBar = buildMergedBar(weekRemaining, fiveHourRemaining, barLength, payload);
   const multiplierLabel = formatUsageMultiplierBadge(usageMultiplier);
+  const fastModeBadge = resolveFastModeBadge(payload);
   const resolvedTitle = localizedTitle(title);
   const showTitle = resolvedTitle && resolvedTitle !== tr('defaultTitle');
+  const prefix = [fastModeBadge, multiplierLabel].filter(Boolean).join(' ');
   if (multiplierLabel) {
-    return showTitle ? `${multiplierLabel} ${resolvedTitle} ${mergedBar}` : `${multiplierLabel} ${mergedBar}`;
+    return showTitle ? `${prefix} ${resolvedTitle} ${mergedBar}` : `${prefix} ${mergedBar}`;
+  }
+  if (fastModeBadge) {
+    return showTitle ? `${fastModeBadge} ${resolvedTitle} ${mergedBar}` : `${fastModeBadge} ${mergedBar}`;
   }
   return showTitle ? `${resolvedTitle} ${mergedBar}` : mergedBar;
 }
@@ -1182,24 +1197,98 @@ function buildTooltip(url, payload, accountName, usageMultiplier) {
 }
 
 async function showAuthFileUsageDetails() {
-  let payload = lastPayload;
-  if (payload) {
-    void refreshUsage(false);
-  } else {
-    await refreshUsage(false);
-    payload = lastPayload;
-  }
+  await new Promise((resolve) => {
+    const quickPick = vscode.window.createQuickPick();
+    quickPick.title = tr('detailsTitle');
+    quickPick.matchOnDescription = true;
+    quickPick.matchOnDetail = true;
+    quickPick.ignoreFocusOut = true;
+
+    let closed = false;
+    let renderTimer;
+    let lastSignature = '';
+
+    const finish = () => {
+      if (closed) {
+        return;
+      }
+      closed = true;
+      if (renderTimer) {
+        clearInterval(renderTimer);
+        renderTimer = undefined;
+      }
+      quickPick.dispose();
+      resolve();
+    };
+
+    const render = (payload, options = {}) => {
+      if (closed) {
+        return;
+      }
+      const loading = Boolean(options.loading);
+      const items = buildAuthFileUsageQuickPickItems(payload, { loading });
+      const signature = buildAuthFileUsageQuickPickSignature(items);
+      if (signature !== lastSignature) {
+        quickPick.items = items;
+        lastSignature = signature;
+      }
+      quickPick.busy = loading;
+      quickPick.placeholder = loading ? tr('fetchingTooltip') : '';
+    };
+
+    const renderLatest = () => {
+      render(lastPayload, { loading: Boolean(inflight) });
+    };
+
+    quickPick.onDidHide(finish);
+    quickPick.show();
+
+    renderLatest();
+
+    renderTimer = setInterval(() => {
+      renderLatest();
+    }, 15000);
+
+    void (async () => {
+      render(lastPayload, { loading: true });
+      try {
+        await refreshUsage(false);
+      } finally {
+        renderLatest();
+      }
+    })();
+  });
+}
+
+function buildAuthFileUsageQuickPickItems(payload, options = {}) {
+  const loading = Boolean(options.loading);
   const items = resolveActiveAuthFilesUsage(payload);
   const grouped = groupAuthFileUsageItems(items);
   const recoveryItems = buildRecoveryQuickPickItems(payload);
   const hasAvailable = grouped.availableGroups.some((group) => Array.isArray(group.items) && group.items.length > 0);
-  if (!hasAvailable && !grouped.exhausted.length && !grouped.hardFailed.length && !recoveryItems.length) {
-    await vscode.window.showInformationMessage(tr('detailsNoData'));
-    return;
+  const compatOnlyNotice = buildCompatOnlyNoticeItem(payload);
+  const hasData = Boolean(compatOnlyNotice)
+    || recoveryItems.length > 0
+    || hasAvailable
+    || grouped.exhausted.length > 0
+    || grouped.hardFailed.length > 0;
+
+  if (!hasData) {
+    return [loading
+      ? {
+          label: tr('loading'),
+          description: tr('fetchingTooltip'),
+          alwaysShow: true
+        }
+      : {
+          label: tr('detailsNoData'),
+          alwaysShow: true
+        }];
   }
 
   const mapAuthUsageItem = (item) => {
     const account = valueToString(item.account) || tr('detailsUnknownAccount');
+    const weightInfo = formatAuthUsageWeightInfo(item);
     const plan = valueToString(item.plan_type) || tr('detailsUnknownPlan');
     const forceZeroRemaining = isWeekUsageExhausted(item);
     const displayFiveHourWindow = forceZeroRemaining ? { used_percent: 100 } : item.five_hour;
@@ -1219,16 +1308,20 @@ async function showAuthFileUsageDetails() {
     const description = errorSummary
       ? `${usageWithIdentity} | ${tr('detailsError', { value: truncate(errorSummary, 90) })}`
       : usageWithIdentity;
-    const waitDetail = `${tr('weekResetWait')} ${weekResetWait} | ${tr('fiveHourResetWait')} ${fiveHourResetWait}`;
+    const waitDetailParts = [];
+    if (weightInfo) {
+      waitDetailParts.push(weightInfo);
+    }
+    waitDetailParts.push(`${tr('weekResetWait')} ${weekResetWait}`);
+    waitDetailParts.push(`${tr('fiveHourResetWait')} ${fiveHourResetWait}`);
     return {
       label: account,
       description,
-      detail: waitDetail
+      detail: waitDetailParts.join(' | ')
     };
   };
 
   const quickPickItems = [];
-  const compatOnlyNotice = buildCompatOnlyNoticeItem(payload);
   if (compatOnlyNotice) {
     quickPickItems.push(compatOnlyNotice);
   }
@@ -1271,12 +1364,17 @@ async function showAuthFileUsageDetails() {
     quickPickItems.push(...grouped.hardFailed.map(mapAuthUsageItem));
   }
 
-  await vscode.window.showQuickPick(quickPickItems, {
-    title: tr('detailsTitle'),
-    matchOnDescription: true,
-    matchOnDetail: true,
-    ignoreFocusOut: true
-  });
+  return quickPickItems;
+}
+
+function buildAuthFileUsageQuickPickSignature(items) {
+  return JSON.stringify((Array.isArray(items) ? items : []).map((item) => ({
+    label: item && item.label,
+    description: item && item.description,
+    detail: item && item.detail,
+    kind: item && item.kind,
+    alwaysShow: item && item.alwaysShow
+  })));
 }
 
 function buildCompatOnlyNoticeItem(payload) {
@@ -1346,12 +1444,12 @@ function groupAuthFileUsageItems(items) {
     if (!item || typeof item !== 'object') {
       continue;
     }
-    if (isHardFailedAuthUsage(item)) {
-      hardFailed.push(item);
-      continue;
-    }
     if (isWeekUsageExhausted(item)) {
       exhausted.push(item);
+      continue;
+    }
+    if (isHardFailedAuthUsage(item)) {
+      hardFailed.push(item);
       continue;
     }
     const priority = resolveAuthUsagePriority(item);
@@ -1364,11 +1462,11 @@ function groupAuthFileUsageItems(items) {
     .sort((a, b) => b[0] - a[0])
     .map(([priority, groupItems]) => ({
       priority,
-      items: groupItems.sort(compareLastUsedDesc)
+      items: groupItems.sort(compareWeightDescThenLastUsedDesc)
     }));
 
-  exhausted.sort(compareWeekResetWaitAscThenLastUsedDesc);
-  hardFailed.sort(compareLastUsedDesc);
+  exhausted.sort(compareWeekResetWaitAscThenWeightDescThenLastUsedDesc);
+  hardFailed.sort(compareWeightDescThenLastUsedDesc);
 
   return { availableGroups, exhausted, hardFailed };
 }
@@ -1401,13 +1499,21 @@ function compareLastUsedDesc(a, b) {
   return safeMillis(b.last_used_at) - safeMillis(a.last_used_at);
 }
 
-function compareWeekResetWaitAscThenLastUsedDesc(a, b) {
+function compareWeightDescThenLastUsedDesc(a, b) {
+  const weightDiff = resolveAuthUsageItemCapacityUnits(b) - resolveAuthUsageItemCapacityUnits(a);
+  if (Math.abs(weightDiff) > 1e-9) {
+    return weightDiff;
+  }
+  return compareLastUsedDesc(a, b);
+}
+
+function compareWeekResetWaitAscThenWeightDescThenLastUsedDesc(a, b) {
   const waitA = resolveWeekResetWaitSortKey(a);
   const waitB = resolveWeekResetWaitSortKey(b);
   if (waitA !== waitB) {
     return waitA - waitB;
   }
-  return safeMillis(b.last_used_at) - safeMillis(a.last_used_at);
+  return compareWeightDescThenLastUsedDesc(a, b);
 }
 
 function resolveWeekResetWaitText(item) {
@@ -2200,6 +2306,19 @@ function resolveUsageMultiplier(payload) {
     }
   }
   return best;
+}
+
+function resolveSelectedAuthServiceTier(payload) {
+  const direct = String(getByPath(payload, 'extensions.service_tier') || '').trim().toLowerCase();
+  if (direct) {
+    return direct;
+  }
+  const serviceTier = String(getByPath(payload, 'extensions.selected_auth.service_tier') || '').trim().toLowerCase();
+  return serviceTier;
+}
+
+function resolveFastModeBadge(payload) {
+  return resolveSelectedAuthServiceTier(payload) === 'priority' ? '$(zap)' : '';
 }
 
 function formatUsageMultiplierLabel(multiplier) {
