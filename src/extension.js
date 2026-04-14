@@ -1263,15 +1263,10 @@ async function showAuthFileUsageDetails() {
 function buildAuthFileUsageQuickPickItems(payload, options = {}) {
   const loading = Boolean(options.loading);
   const items = resolveActiveAuthFilesUsage(payload);
-  const grouped = groupAuthFileUsageItems(items);
-  const recoveryItems = buildRecoveryQuickPickItems(payload);
-  const hasAvailable = grouped.availableGroups.some((group) => Array.isArray(group.items) && group.items.length > 0);
+  const sortedItems = sortAuthFileUsageItemsForDetails(items);
   const compatOnlyNotice = buildCompatOnlyNoticeItem(payload);
   const hasData = Boolean(compatOnlyNotice)
-    || recoveryItems.length > 0
-    || hasAvailable
-    || grouped.exhausted.length > 0
-    || grouped.hardFailed.length > 0;
+    || sortedItems.length > 0;
 
   if (!hasData) {
     return [loading
@@ -1286,7 +1281,8 @@ function buildAuthFileUsageQuickPickItems(payload, options = {}) {
         }];
   }
 
-  const mapAuthUsageItem = (item) => {
+  const mapAuthUsageItem = (item, options = {}) => {
+    const priority = Number(options.priority);
     const account = valueToString(item.account) || tr('detailsUnknownAccount');
     const weightInfo = formatAuthUsageWeightInfo(item);
     const plan = valueToString(item.plan_type) || tr('detailsUnknownPlan');
@@ -1309,6 +1305,9 @@ function buildAuthFileUsageQuickPickItems(payload, options = {}) {
       ? `${usageWithIdentity} | ${tr('detailsError', { value: truncate(errorSummary, 90) })}`
       : usageWithIdentity;
     const waitDetailParts = [];
+    if (Number.isFinite(priority)) {
+      waitDetailParts.push(tr('detailsPriorityGroup', { value: priority }));
+    }
     if (weightInfo) {
       waitDetailParts.push(weightInfo);
     }
@@ -1325,43 +1324,8 @@ function buildAuthFileUsageQuickPickItems(payload, options = {}) {
   if (compatOnlyNotice) {
     quickPickItems.push(compatOnlyNotice);
   }
-  quickPickItems.push(...recoveryItems);
-  const sectionCount = Number(hasAvailable) + Number(grouped.exhausted.length > 0) + Number(grouped.hardFailed.length > 0);
-
-  if (hasAvailable) {
-    if (sectionCount > 1) {
-      quickPickItems.push({
-        label: tr('detailsSectionAvailable'),
-        kind: vscode.QuickPickItemKind.Separator
-      });
-    }
-    const showPrioritySeparators = grouped.availableGroups.length > 0;
-    for (const group of grouped.availableGroups) {
-      if (!Array.isArray(group.items) || !group.items.length) {
-        continue;
-      }
-      if (showPrioritySeparators) {
-        quickPickItems.push({
-          label: tr('detailsPriorityGroup', { value: group.priority }),
-          kind: vscode.QuickPickItemKind.Separator
-        });
-      }
-      quickPickItems.push(...group.items.map(mapAuthUsageItem));
-    }
-  }
-  if (grouped.exhausted.length > 0) {
-    quickPickItems.push({
-      label: tr('detailsSectionWeekExhausted'),
-      kind: vscode.QuickPickItemKind.Separator
-    });
-    quickPickItems.push(...grouped.exhausted.map(mapAuthUsageItem));
-  }
-  if (grouped.hardFailed.length > 0) {
-    quickPickItems.push({
-      label: tr('detailsSectionHardError'),
-      kind: vscode.QuickPickItemKind.Separator
-    });
-    quickPickItems.push(...grouped.hardFailed.map(mapAuthUsageItem));
+  if (sortedItems.length > 0) {
+    quickPickItems.push(...sortedItems.map((item) => mapAuthUsageItem(item, { priority: resolveAuthUsagePriority(item) })));
   }
 
   return quickPickItems;
@@ -1471,6 +1435,10 @@ function groupAuthFileUsageItems(items) {
   return { availableGroups, exhausted, hardFailed };
 }
 
+function sortAuthFileUsageItemsForDetails(items) {
+  return (Array.isArray(items) ? items.slice() : []).sort(compareLastUsedDescThenPriorityDescThenWeightDesc);
+}
+
 function resolveAuthUsagePriority(item) {
   const value = Number(getByPath(item, 'priority'));
   if (Number.isFinite(value)) {
@@ -1497,6 +1465,20 @@ function compareAuthUsageItems(a, b) {
 
 function compareLastUsedDesc(a, b) {
   return safeMillis(b.last_used_at) - safeMillis(a.last_used_at);
+}
+
+function compareLastUsedDescThenPriorityDescThenWeightDesc(a, b) {
+  const lastUsedDiff = compareLastUsedDesc(a, b);
+  if (lastUsedDiff !== 0) {
+    return lastUsedDiff;
+  }
+
+  const priorityDiff = resolveAuthUsagePriority(b) - resolveAuthUsagePriority(a);
+  if (priorityDiff !== 0) {
+    return priorityDiff;
+  }
+
+  return compareWeightDescThenLastUsedDesc(a, b);
 }
 
 function compareWeightDescThenLastUsedDesc(a, b) {
